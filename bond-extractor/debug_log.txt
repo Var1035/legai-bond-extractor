@@ -1,0 +1,25 @@
+--- OCR Text ---
+Lease Agreement 45 years
+
+|— first page will be used
+T Extracted Text (OCR)
+
+12/12/25, 10:26 PM Google Genin
+
+Sonam somes ome ED SRT |
+
+WHS RENIAL AGREEMENT is made and executed on this 32th day of Decenber, 2629 at 10:30 AK
+
+at Bangalore, Karnataka.
+nemeen
+
+Fe. RAM KUMAR, aged about 45 years, residing at #12, Green Avenue, Thdiranagar, Bangalore —
+50038. (Hereinafter referred to as the “LESSOR/OANER”, which expression shall, ues repugnant nl
+to the context or meaning thereof, include his heirs, executors, aduinistrators, and assigns) of the
+
+BS ony Ha@sc Se BPOMP OPA 5 maw tse
+----------------
+Purpose: Rental Agreement
+Parties: ['Sonam', 'ED SRT']
+ML Purpose: {'purpose': 'Lease Agreement', 'purpose_scores': {'Rental Agreement': 0.5, 'Lease Agreement': 1.0, 'Sale Agreement': 0.0, 'Mortgage/Loan': 0.0, 'Power of Attorney': 0.0, 'Agreement/Other': 0.5, 'Unknown': 0.0}}
+Entities: [{'entity_group': 'ORG', 'word': 'Google Gen', 'type': 'ORG', 'value': 'Google Gen', 'score': 0.6055057644844055}, {'entity_group': 'ORG', 'word': 'Son', 'type': 'ORG', 'value': 'Son', 'score': 0.4961675703525543}, {'entity_group': 'MISC', 'word': '##EN', 'type': 'MISC', 'value': '##EN', 'score': 0.5693322420120239}, {'entity_group': 'MISC', 'word': 'AK', 'type': 'MISC', 'value': 'AK', 'score': 0.7601433992385864}, {'entity_group': 'LOC', 'word': 'Bangalore', 'type': 'LOC', 'value': 'Bangalore', 'score': 0.9995249509811401}, {'entity_group': 'LOC', 'word': 'Karnataka', 'type': 'LOC', 'value': 'Karnataka', 'score': 0.9986503720283508}, {'entity_group': 'PER', 'word': 'Fe', 'type': 'PER', 'value': 'Fe', 'score': 0.860666036605835}, {'entity_group': 'PER', 'word': 'RAM K', 'type': 'PER', 'value': 'RAM K', 'score': 0.916736364364624}, {'entity_group': 'ORG', 'word': '##UM', 'type': 'ORG', 'value': '##UM', 'score': 0.4497576951980591}, {'entity_group': 'PER', 'word': '##AR', 'type': 'PER', 'value': '##AR', 'score': 0.4951084852218628}, {'entity_group': 'LOC', 'word': 'Green Avenue', 'type': 'LOC', 'value': 'Green Avenue', 'score': 0.927958607673645}, {'entity_group': 'LOC', 'word': 'Thdiranagar', 'type': 'LOC', 'value': 'Thdiranagar', 'score': 0.9703671336174011}, {'entity_group': 'LOC', 'word': 'Bangalore', 'type': 'LOC', 'value': 'Bangalore', 'score': 0.9982872605323792}, {'entity_group': 'ORG', 'word': 'L', 'type': 'ORG', 'value': 'L', 'score': 0.47098851203918457}, {'entity_group': 'ORG', 'word': 'O', 'type': 'ORG', 'value': 'O', 'score': 0.5018767714500427}, {'entity_group': 'ORG', 'word': 'BS', 'type': 'ORG', 'value': 'BS', 'score': 0.672333300113678}]

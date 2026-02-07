@@ -1,0 +1,4257 @@
+# app.py — Bond Extractor (OCR + Hybrid OCR: Tesseract → PaddleOCR → TrOCR) + local ML + optional Gemini/HF
+import os
+import io
+import re
+import json
+import time
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
+import pytesseract
+from dateutil import parser as dateparser
+
+# --- configure Tesseract path (update if yours differs) ---
+# If Tesseract is installed but not in PATH, set this to the absolute path to tesseract.exe
+# Example: r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# If left as None, we'll try shutil.which and fallback to default behaviour.
+TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"  # <-- adjust if needed
+if TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
+# PDF support
+try:
+    from pdf2image import convert_from_bytes
+    PDF2IMAGE_AVAILABLE = True
+except Exception:
+    PDF2IMAGE_AVAILABLE = False
+
+# Optional external API libs
+import requests
+
+# ML libraries (lazy load later)
+_ml_loaded = False
+
+# ---------- Hybrid OCR adapters (lazy imported) ----------
+_trocr_available = None
+_trocr_pipeline = None
+
+_paddle_available = None
+_paddle_ocr = None
+
+def ensure_paddleocr():
+    """Lazy import/instantiate PaddleOCR. Returns True if available."""
+    global _paddle_available, _paddle_ocr
+    if _paddle_available is not None:
+        return _paddle_available
+    try:
+        # import inside function to avoid heavy import at startup
+        from paddleocr import PaddleOCR
+        # instantiate with safe defaults — many paddleocr releases accept these args
+        _paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en')
+        _paddle_available = True
+    except Exception as e:
+        print("PaddleOCR not available:", e)
+        _paddle_available = False
+    return _paddle_available
+
+def ocr_paddle(img: Image.Image) -> Dict[str, Any]:
+    """Run PaddleOCR and return {'text': str, 'confidence': float}."""
+    ok = ensure_paddleocr()
+    if not ok:
+        return {"text": "", "confidence": 0.0}
+    try:
+        import numpy as np
+        arr = np.array(img.convert("RGB"))
+        result = _paddle_ocr.ocr(arr, cls=False)
+        texts = []
+        confs = []
+        # result can be nested lists; handle common shapes
+        for line in result:
+            if isinstance(line, list):
+                for block in line:
+                    # block usually like [box, (text, score)]
+                    try:
+                        candidate = block[1]
+                        txt = candidate[0] if isinstance(candidate, (list, tuple)) else str(candidate)
+                        score = float(candidate[1]) if isinstance(candidate, (list, tuple)) and len(candidate) > 1 else 0.0
+                    except Exception:
+                        try:
+                            txt = str(block[1])
+                            score = 0.0
+                        except Exception:
+                            txt = ""
+                            score = 0.0
+                    if txt:
+                        texts.append(txt)
+                        # normalize to percentage style
+                        confs.append(score * 100.0 if score <= 1.0 else score)
+            elif isinstance(line, tuple) and len(line) >= 2:
+                try:
+                    txt = line[1][0]
+                    score = float(line[1][1])
+                except Exception:
+                    txt = str(line[1])
+                    score = 0.0
+                texts.append(txt)
+                confs.append(score * 100.0 if score <= 1.0 else score)
+        joined = "\n".join([t.strip() for t in texts if t.strip()])
+        avg_conf = float(sum(confs) / len(confs)) if confs else 0.0
+        return {"text": joined, "confidence": round(avg_conf, 2)}
+    except Exception as e:
+        print("PaddleOCR error:", e)
+        return {"text": "", "confidence": 0.0}
+
+def ensure_trocr():
+    """Lazy load TrOCR pipeline (image-to-text)."""
+    global _trocr_available, _trocr_pipeline
+    if _trocr_available is not None:
+        return _trocr_available
+    try:
+        from transformers import pipeline
+        # Use CPU (-1). If you have GPU change device accordingly.
+        _trocr_pipeline = pipeline("image-to-text", model="microsoft/trocr-base-handwritten", device=-1)
+        _trocr_available = True
+    except Exception as e:
+        print("TrOCR pipeline not available:", e)
+        _trocr_available = False
+    return _trocr_available
+
+def ocr_trocr(img: Image.Image) -> Dict[str, Any]:
+    """Run TrOCR (Vision->Text) pipeline. Returns dict with text+confidence heuristic."""
+    ok = ensure_trocr()
+    if not ok:
+        return {"text": "", "confidence": 0.0}
+    try:
+        # Some pipeline versions accept lists, some accept images; pass PIL image directly
+        res = _trocr_pipeline(img)
+        if isinstance(res, list) and res:
+            # typical return: [{"generated_text": "...", ...}] or list of strings
+            if isinstance(res[0], dict):
+                txts = [r.get("generated_text", "") for r in res]
+            else:
+                txts = [str(r) for r in res]
+            joined = " ".join([t.strip() for t in txts if t.strip()])
+            # There's no confidence in many TrOCR outputs — use heuristic
+            return {"text": joined, "confidence": 60.0}
+        # fallback
+        return {"text": str(res), "confidence": 60.0}
+    except Exception as e:
+        print("TrOCR error:", e)
+        return {"text": "", "confidence": 0.0}
+
+# ----------------- Utilities -----------------
+def convert_file_to_images(data: bytes) -> List[Image.Image]:
+    """Return list of PIL images for given file bytes (image or PDF pages)."""
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        return [img]
+    except Exception:
+        pass
+
+    if PDF2IMAGE_AVAILABLE:
+        try:
+            pages = convert_from_bytes(data, dpi=200)
+            return [p.convert("RGB") for p in pages]
+        except Exception as e:
+            raise HTTPException(400, f"Could not convert PDF: {e}")
+
+    raise HTTPException(400, "Unsupported file. Install pdf2image for PDF support or upload an image.")
+
+def ocr_tesseract(img: Image.Image) -> Dict[str, Any]:
+    """Run Tesseract OCR and return text + naive confidence (0-100)."""
+    try:
+        txt = pytesseract.image_to_string(img) or ""
+        # pytesseract doesn't return confidence easily; use mean of confidences from hOCR if needed.
+        # For simplicity we set heuristic confidence if text length is small/large
+        conf = 70.0 if len(txt.strip()) > 10 else 30.0
+        return {"text": txt, "confidence": conf}
+    except Exception as e:
+        print("pytesseract error:", e)
+        return {"text": "", "confidence": 0.0}
+
+def hybrid_ocr_image(img: Image.Image, engines: List[str] = None) -> Dict[str, Any]:
+    """
+    Try multiple OCR engines in order and return best result plus details.
+    engines: list like ['tesseract','paddle','trocr'] - default hybrid order.
+    Returns:
+      {
+        'text': str, 'confidence': float,
+        'used': 'paddle', 'details': [ {engine, text, confidence, time_ms}, ... ]
+      }
+    """
+    if engines is None:
+        engines = ['tesseract', 'paddle', 'trocr']
+
+    details = []
+    best_text = ""
+    best_conf = -1.0
+    used_engine = None
+
+    for eng in engines:
+        start = time.time()
+        try:
+            if eng == 'tesseract':
+                out = ocr_tesseract(img)
+            elif eng == 'paddle':
+                out = ocr_paddle(img)
+            elif eng == 'trocr':
+                out = ocr_trocr(img)
+            else:
+                out = {"text": "", "confidence": 0.0}
+        except Exception as e:
+            out = {"text": "", "confidence": 0.0}
+            print(f"Engine {eng} failed:", e)
+        elapsed = int((time.time() - start) * 1000)
+        details.append({
+            "engine": eng,
+            "text_snippet": (out.get("text") or "")[:300],
+            "full_text": out.get("text") or "",
+            "confidence": float(out.get("confidence") or 0.0),
+            "time_ms": elapsed
+        })
+        # choose best by confidence then by length heuristic
+        conf = float(out.get("confidence") or 0.0)
+        txt = (out.get("text") or "").strip()
+        score = conf + min(len(txt), 100) * 0.1  # small boost for longer text
+        if score > best_conf:
+            best_conf = score
+            best_text = txt
+            used_engine = eng
+
+        # quick accept if high confidence and non-empty
+        if conf >= 85.0 and txt:
+            used_engine = eng
+            break
+
+    return {
+        "text": best_text,
+        "confidence": round(best_conf, 2) if best_conf >= 0 else 0.0,
+        "used": used_engine,
+        "details": details
+    }
+
+def simple_summary(text: str, max_chars: int = 300) -> str:
+    if not text:
+        return ""
+    sentences = re.split(r'(?<=[.!?])\s+', text.replace("\n", " "))
+    out = []
+    total = 0
+    for s in sentences:
+        s2 = s.strip()
+        if s2:
+            out.append(s2)
+            total += len(s2)
+            if total > max_chars:
+                break
+    return " ".join(out).strip()
+
+# ----------------- Heuristics fields -----------------
+def extract_duration(text: str) -> Optional[str]:
+    patterns = [
+        r'(\d{1,2}\s*(?:years|year|yrs|yr))',
+        r'period of\s+(\d{1,2}\s*(?:years|year|yrs|yr))',
+        r'for\s+(\d{1,2}\s*(?:years|year|yrs|yr))'
+    ]
+    for p in patterns:
+        m = re.search(p, text, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
+
+def extract_dates(text: str) -> List[str]:
+    dates = []
+    date_like = re.findall(r'\b(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s+\w+\s+\d{4}|\w+\s+\d{1,2},\s*\d{4})\b', text)
+    for d in date_like:
+        try:
+            parsed = dateparser.parse(d, fuzzy=True)
+            dates.append(parsed.strftime("%Y-%m-%d"))
+        except Exception:
+            pass
+    chunks = re.split(r'[\n\r]+', text)[:10]
+    for chunk in chunks:
+        try:
+            parsed = dateparser.parse(chunk, fuzzy=True)
+            if parsed:
+                dt = parsed.strftime("%Y-%m-%d")
+                if dt not in dates:
+                    dates.append(dt)
+        except Exception:
+            pass
+    return dates
+
+def extract_parties(text: str) -> List[str]:
+    t = text[:2000]
+    patterns = [
+        r'between\s+(.{1,120}?)\s+and\s+(.{1,120}?)\.',
+        r'by and between\s+(.{1,120}?)\s+and\s+(.{1,120}?)\.',
+        r'between\s+(.{1,120}?)\s+and\s+(.{1,120}?)\n',
+    ]
+    for p in patterns:
+        m = re.search(p, t, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            a = re.sub(r'\s+', ' ', m.group(1)).strip()
+            b = re.sub(r'\s+', ' ', m.group(2)).strip()
+            return [a, b]
+    names = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b', t)
+    unique = []
+    for n in names:
+        if len(n) > 2 and n.lower() not in ['this','agreement','the','whereas']:
+            if n not in unique:
+                unique.append(n)
+        if len(unique) >= 2:
+            break
+    return unique
+
+def extract_money(text: str) -> List[str]:
+    monies = re.findall(r'(?:Rs\.?|INR|₹)\s*[,\d]+(?:\.\d+)?|\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\s*(?:rupees|Rs)\b', text, flags=re.IGNORECASE)
+    return list({m.strip() for m in monies})
+
+def detect_purpose(text: str) -> Optional[str]:
+    mapping = {
+        'lease': ['lease', 'let', 'tenant', 'landlord', 'rent'],
+        'sale': ['sale', 'sold', 'purchase', 'buyer', 'seller'],
+        'mortgage': ['mortgage', 'security', 'mortgagee', 'mortgagor'],
+        'power_of_attorney': ['power of attorney', 'attorney'],
+        'agreement': ['agreement', 'whereas', 'party of the first part'],
+    }
+    text_l = text.lower()
+    scores = {}
+    for k, kws in mapping.items():
+        scores[k] = sum(1 for w in kws if w in text_l)
+    best = max(scores, key=lambda x: scores[x])
+    if scores[best] > 0:
+        labels = {
+            'lease': 'Lease Agreement',
+            'sale': 'Sale Agreement',
+            'mortgage': 'Mortgage/Loan',
+            'power_of_attorney': 'Power of Attorney',
+            'agreement': 'Agreement/Other'
+        }
+        return labels.get(best, best)
+    return None
+
+def extract_fields_from_text(text: str) -> Dict[str, Any]:
+    purpose = detect_purpose(text) or "Unknown"
+    duration = extract_duration(text)
+    dates = extract_dates(text)
+    parties = extract_parties(text)
+    money = extract_money(text)
+    summary = simple_summary(text)
+    return {
+        "purpose": purpose,
+        "duration": duration,
+        "dates": dates,
+        "parties": parties,
+        "amounts": money,
+        "summary": summary,
+        "raw_text_length": len(text)
+    }
+
+# ----------------- ML lazy-loading (summarizer, NER, embeddings) -----------------
+def load_ml_models_once():
+    global _ml_loaded
+    if _ml_loaded:
+        return
+    try:
+        from transformers import pipeline
+        from sentence_transformers import SentenceTransformer
+    except Exception as e:
+        print("Local ML libs not installed or available:", e)
+        _ml_loaded = True
+        # placeholders
+        app.state.summarizer = None
+        app.state.ner_pipe = None
+        app.state.embed_model = None
+        return
+
+    app.state.summarizer = None
+    app.state.ner_pipe = None
+    app.state.embed_model = None
+
+    print("Loading summarizer (local)...")
+    try:
+        app.state.summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+        print("Summarizer loaded.")
+    except Exception as e:
+        print("Could not load summarizer locally:", e)
+        app.state.summarizer = None
+
+    print("Loading NER (local)...")
+    try:
+        app.state.ner_pipe = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english", grouped_entities=True)
+        print("NER loaded.")
+    except Exception as e:
+        print("Primary NER load failed, trying fallback:", e)
+        try:
+            app.state.ner_pipe = pipeline("ner", model="dslim/bert-base-NER", grouped_entities=True)
+            print("Fallback NER loaded.")
+        except Exception as e2:
+            print("No local NER available:", e2)
+            app.state.ner_pipe = None
+
+    print("Loading embeddings (all-MiniLM-L6-v2)...")
+    try:
+        from sentence_transformers import SentenceTransformer
+        app.state.embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        print("Embeddings loaded.")
+    except Exception as e:
+        print("Embeddings load failed:", e)
+        app.state.embed_model = None
+
+    _ml_loaded = True
+    print("ML lazy-load complete.")
+
+def ml_summary(text: str) -> Optional[str]:
+    if not text or not text.strip():
+        return None
+    load_ml_models_once()
+    summ = None
+    try:
+        if getattr(app.state, "summarizer", None):
+            # summarizer may throw warnings if input is tiny; that's fine
+            out = app.state.summarizer(text[:4000], max_length=130, min_length=30, do_sample=False)
+            if isinstance(out, list) and out:
+                summ = out[0].get("summary_text")
+    except Exception as e:
+        print("Local summarizer error:", e)
+        summ = None
+    if not summ:
+        return simple_summary(text, max_chars=400)
+    return summ
+
+def ml_entities(text: str) -> List[Dict[str, Any]]:
+    if not text or not text.strip():
+        return []
+    load_ml_models_once()
+    try:
+        ner = getattr(app.state, "ner_pipe", None)
+        if ner:
+            out = ner(text[:2000])
+            cleaned = []
+            for ent in out:
+                cleaned.append({
+                    "entity_group": ent.get("entity_group") or ent.get("entity"),
+                    "word": ent.get("word") or ent.get("entity"),
+                    "score": float(ent.get("score", 0.0))
+                })
+            return cleaned
+    except Exception as e:
+        print("Local NER error:", e)
+    return []
+
+def ml_purpose_scores(text: str) -> Dict[str, Any]:
+    labels = ["Lease Agreement", "Sale Agreement", "Mortgage/Loan", "Power of Attorney", "Agreement/Other", "Unknown"]
+    keywords = {
+        "Lease Agreement": ["lease", "tenant", "landlord", "rent"],
+        "Sale Agreement": ["sale", "buyer", "seller", "sold", "purchase"],
+        "Mortgage/Loan": ["mortgage", "loan", "security", "mortgagor", "mortgagee"],
+        "Power of Attorney": ["power of attorney", "attorney", "agent"],
+        "Agreement/Other": ["agreement", "whereas", "party of the first part"]
+    }
+    t = text.lower()
+    scores = {k: 0 for k in labels}
+    for k, kws in keywords.items():
+        scores[k] = sum(1 for kw in kws if kw in t)
+    maxv = max(scores.values()) if scores else 0
+    if maxv == 0:
+        scores["Unknown"] = 1
+    else:
+        for k in scores:
+            scores[k] = round(scores[k] / (maxv if maxv > 0 else 1), 3)
+    purpose = max(scores, key=lambda x: scores[x])
+    return {"purpose": purpose, "purpose_scores": scores}
+
+# ----------------- Gemini (external) placeholder -----------------
+def call_gemini_external(text: str) -> Optional[Dict[str, Any]]:
+    if os.environ.get("GEMINI_ENABLED") != "1":
+        return None
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("Gemini enabled but GEMINI_API_KEY missing.")
+        return None
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-mini:generateContent?key=" + api_key
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": f"Extract a JSON summary (purpose, parties, amounts, dates, summary, risks) from the contract text:\n\n{text[:8000]}"
+            }]
+        }]
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=30)
+        data = r.json()
+        cand = data.get("candidates", [])
+        if cand and isinstance(cand, list):
+            text_out = cand[0].get("content", {}).get("parts", [{}])[0].get("text")
+            return {"gemini_output": text_out}
+    except Exception as e:
+        print("Gemini call failed:", e)
+    return None
+
+# ---- FastAPI app ----
+app = FastAPI(title="Bond Extractor (OCR + ML + Hybrid)")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # dev only; restrict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+print("PDF2Image available:", PDF2IMAGE_AVAILABLE)
+print("Bond Extractor starting... (Hybrid OCR will try Tesseract → PaddleOCR → TrOCR)")
+
+# ----------------- Endpoints -----------------
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)):
+    """Upload image or PDF. Returns OCR text + heuristics + ML + optional Gemini output."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file uploaded.")
+
+    # save original upload
+    fp = os.path.join(UPLOAD_DIR, file.filename)
+    with open(fp, "wb") as f:
+        f.write(data)
+
+    # convert to images (first page or pages)
+    pages = convert_file_to_images(data)
+
+    # For each page, run hybrid OCR
+    full_text = ""
+    hybrid_details_per_page = []
+    for idx, p in enumerate(pages, start=1):
+        res = hybrid_ocr_image(p, engines=['tesseract', 'paddle', 'trocr'])
+        hybrid_details_per_page.append(res)
+        full_text += (res.get("text") or "") + "\n\n"
+
+    # heuristics
+    fields = extract_fields_from_text(full_text)
+
+    # local ML enrichments (lazy)
+    try:
+        ml_sum = ml_summary(full_text)
+        ml_ents = ml_entities(full_text)
+        ml_purpose = ml_purpose_scores(full_text)
+    except Exception as e:
+        print("ML enrichment failed:", e)
+        ml_sum = None
+        ml_ents = []
+        ml_purpose = {"purpose": None, "purpose_scores": {}}
+
+    fields["ml"] = {
+        "summary": ml_sum,
+        "entities": ml_ents,
+        "purpose": ml_purpose.get("purpose"),
+        "purpose_scores": ml_purpose.get("purpose_scores")
+    }
+
+    # optional Gemini external enrichment
+    gem = call_gemini_external(full_text)
+    if gem:
+        fields["gemini"] = gem
+
+    out = {
+        "method_used": "hybrid",  # hybrid pipeline used
+        "pages_ocr": len(pages),
+        "extracted_text": full_text,
+        "fields": fields,
+        "hybrid_details": hybrid_details_per_page
+    }
+    return JSONResponse(out)
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    path = os.path.join("static", "index.html")
+    if not os.path.exists(path):
+        return HTMLResponse("<h2>UI not found: static/index.html</h2>", status_code=404)
+    with open(path, "r", encoding="utf8") as f:
+        return HTMLResponse(f.read())
+
+@app.get("/health")
+def health():
+    # quick Tesseract check
+    import shutil
+    tpath = shutil.which("tesseract")
+    t_ok = bool(tpath)
+    return {"status": "ok", "tesseract_in_path": t_ok, "tesseract_cmd_configured": pytesseract.pytesseract.tesseract_cmd}
+
+# ----------------- Helpful dev utility -----------------
+if __name__ == "__main__":
+    print("Run this with: uvicorn app:app --reload --port 8000")
+
+
++__________________________
+
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Bond Extractor — Ultra Premium UI</title>
+
+  <!-- Fonts -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap"
+    rel="stylesheet">
+
+  <!-- Lottie Player -->
+  <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
+
+  <meta name="description"
+    content="Bond Extractor — upload agreements (images/PDF). OCR, ML insights, clean UI and fast UX.">
+
+  <style>
+    :root {
+      --bg-primary: #030014;
+      --bg-secondary: #0a0a1a;
+      --glass-bg: rgba(255, 255, 255, 0.03);
+      --glass-border: rgba(255, 255, 255, 0.08);
+      --glass-shine: rgba(255, 255, 255, 0.1);
+      --text-primary: #ffffff;
+      --text-secondary: #a1a1aa;
+      --text-muted: #71717a;
+      --accent-purple: #8b5cf6;
+      --accent-cyan: #06b6d4;
+      --accent-pink: #ec4899;
+      --accent-emerald: #10b981;
+      --gradient-primary: linear-gradient(135deg, #8b5cf6 0%, #06b6d4 50%, #ec4899 100%);
+      --gradient-glass: linear-gradient(135deg, rgba(139, 92, 246, 0.1) 0%, rgba(6, 182, 212, 0.05) 100%);
+      --shadow-glow: 0 0 60px rgba(139, 92, 246, 0.3);
+      --shadow-card: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      --radius-lg: 24px;
+      --radius-md: 16px;
+      --radius-sm: 12px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* Animated Background */
+    .bg-animation {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 0;
+      overflow: hidden;
+    }
+
+    .bg-orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(80px);
+      opacity: 0.4;
+      animation: float-orb 20s ease-in-out infinite;
+    }
+
+    .orb-1 {
+      width: 600px;
+      height: 600px;
+      background: var(--accent-purple);
+      top: -200px;
+      left: -200px;
+      animation-delay: 0s;
+    }
+
+    .orb-2 {
+      width: 500px;
+      height: 500px;
+      background: var(--accent-cyan);
+      top: 50%;
+      right: -150px;
+      animation-delay: -7s;
+    }
+
+    .orb-3 {
+      width: 400px;
+      height: 400px;
+      background: var(--accent-pink);
+      bottom: -100px;
+      left: 30%;
+      animation-delay: -14s;
+    }
+
+    @keyframes float-orb {
+
+      0%,
+      100% {
+        transform: translate(0, 0) scale(1);
+      }
+
+      25% {
+        transform: translate(50px, -50px) scale(1.1);
+      }
+
+      50% {
+        transform: translate(-30px, 30px) scale(0.95);
+      }
+
+      75% {
+        transform: translate(40px, 20px) scale(1.05);
+      }
+    }
+
+    /* Grid Pattern Overlay */
+    .grid-pattern {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-image:
+        linear-gradient(rgba(139, 92, 246, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(139, 92, 246, 0.03) 1px, transparent 1px);
+      background-size: 60px 60px;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    /* Main Container */
+    .container {
+      position: relative;
+      z-index: 10;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 40px 32px;
+    }
+
+    /* Glassmorphism Card */
+    .glass-card {
+      background: var(--glass-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .glass-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--glass-shine), transparent);
+    }
+
+    /* Hero Section */
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 40px;
+      align-items: center;
+      min-height: 60vh;
+      padding: 60px 0;
+    }
+
+    .hero-content {
+      position: relative;
+    }
+
+    /* Animated Logo */
+    .logo-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      margin-bottom: 32px;
+    }
+
+    .logo {
+      width: 88px;
+      height: 88px;
+      border-radius: 22px;
+      background: var(--gradient-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: var(--shadow-glow);
+      position: relative;
+      animation: logo-float 6s ease-in-out infinite;
+    }
+
+    .logo::before {
+      content: '';
+      position: absolute;
+      inset: -3px;
+      border-radius: 25px;
+      background: var(--gradient-primary);
+      z-index: -1;
+      filter: blur(15px);
+      opacity: 0.6;
+      animation: pulse-glow 3s ease-in-out infinite;
+    }
+
+    @keyframes logo-float {
+
+      0%,
+      100% {
+        transform: translateY(0) rotate(-5deg);
+      }
+
+      50% {
+        transform: translateY(-12px) rotate(5deg);
+      }
+    }
+
+    @keyframes pulse-glow {
+
+      0%,
+      100% {
+        opacity: 0.4;
+        transform: scale(1);
+      }
+
+      50% {
+        opacity: 0.8;
+        transform: scale(1.1);
+      }
+    }
+
+    .logo svg {
+      filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.3));
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 100px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      animation: fade-in-up 0.6s ease-out;
+    }
+
+    .badge-dot {
+      width: 8px;
+      height: 8px;
+      background: var(--accent-emerald);
+      border-radius: 50%;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+        transform: scale(1);
+      }
+
+      50% {
+        opacity: 0.5;
+        transform: scale(1.2);
+      }
+    }
+
+    h1 {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: clamp(42px, 5vw, 64px);
+      font-weight: 700;
+      line-height: 1.1;
+      margin-bottom: 20px;
+      background: linear-gradient(135deg, #fff 0%, #a1a1aa 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: fade-in-up 0.6s ease-out 0.1s backwards;
+    }
+
+    .gradient-text {
+      background: var(--gradient-primary);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .lead {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-secondary);
+      max-width: 540px;
+      animation: fade-in-up 0.6s ease-out 0.2s backwards;
+    }
+
+    @keyframes fade-in-up {
+      from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    /* CTA Buttons */
+    .cta-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-top: 40px;
+      animation: fade-in-up 0.6s ease-out 0.3s backwards;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 16px 28px;
+      border-radius: var(--radius-sm);
+      font-weight: 600;
+      font-size: 15px;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      border: none;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .btn-primary {
+      background: var(--gradient-primary);
+      color: white;
+      box-shadow: 0 10px 40px rgba(139, 92, 246, 0.4);
+    }
+
+    .btn-primary::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+      transition: left 0.5s ease;
+    }
+
+    .btn-primary:hover::before {
+      left: 100%;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 20px 60px rgba(139, 92, 246, 0.5);
+    }
+
+    .btn-secondary {
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+      color: var(--text-primary);
+      backdrop-filter: blur(10px);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.15);
+      transform: translateY(-2px);
+    }
+
+    .btn-small {
+      padding: 10px 18px;
+      font-size: 13px;
+    }
+
+    .btn:active {
+      transform: translateY(0) scale(0.98);
+    }
+
+    /* Feature Pills */
+    .feature-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 32px;
+      animation: fade-in-up 0.6s ease-out 0.4s backwards;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 18px;
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 100px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      transition: all 0.3s ease;
+    }
+
+    .pill:hover {
+      background: rgba(255, 255, 255, 0.06);
+      transform: translateY(-2px);
+    }
+
+    .pill-icon {
+      width: 18px;
+      height: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Hero Visual */
+    .hero-visual {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .visual-card {
+      width: 100%;
+      max-width: 480px;
+      padding: 32px;
+      animation: fade-in-up 0.8s ease-out 0.3s backwards;
+    }
+
+    .lottie-container {
+      width: 100%;
+      height: 280px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 24px;
+    }
+
+    .visual-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .stat-item {
+      text-align: center;
+      padding: 16px;
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+      transition: all 0.3s ease;
+    }
+
+    .stat-item:hover {
+      background: rgba(255, 255, 255, 0.04);
+      transform: translateY(-4px);
+    }
+
+    .stat-value {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 28px;
+      font-weight: 700;
+      background: var(--gradient-primary);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* Demo Toggle Area */
+    .demo-area {
+      margin-top: 32px;
+      padding: 24px;
+      animation: fade-in-up 0.6s ease-out 0.5s backwards;
+    }
+
+    .demo-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .toggle-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .toggle {
+      position: relative;
+      width: 48px;
+      height: 26px;
+      appearance: none;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 100px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+
+    .toggle::before {
+      content: '';
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 20px;
+      height: 20px;
+      background: white;
+      border-radius: 50%;
+      transition: all 0.3s ease;
+    }
+
+    .toggle:checked {
+      background: var(--gradient-primary);
+    }
+
+    .toggle:checked::before {
+      transform: translateX(22px);
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.2);
+      border-radius: 100px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--accent-emerald);
+    }
+
+    /* App Shell */
+    .app-shell {
+      display: grid;
+      grid-template-columns: 480px 1fr;
+      gap: 32px;
+      margin-top: 40px;
+      animation: fade-in-up 0.6s ease-out;
+    }
+
+    .upload-card {
+      padding: 28px;
+    }
+
+    .drop-zone {
+      border: 2px dashed rgba(139, 92, 246, 0.3);
+      border-radius: var(--radius-md);
+      padding: 40px 28px;
+      text-align: center;
+      transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      background: linear-gradient(180deg, rgba(139, 92, 246, 0.02) 0%, transparent 100%);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .drop-zone::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at center, rgba(139, 92, 246, 0.1) 0%, transparent 70%);
+      opacity: 0;
+      transition: opacity 0.4s ease;
+    }
+
+    .drop-zone.drag {
+      border-color: var(--accent-purple);
+      transform: scale(1.02);
+      box-shadow: 0 0 40px rgba(139, 92, 246, 0.2);
+    }
+
+    .drop-zone.drag::before {
+      opacity: 1;
+    }
+
+    .drop-icon {
+      width: 72px;
+      height: 72px;
+      margin: 0 auto 20px;
+      background: var(--gradient-primary);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      animation: bounce-gentle 3s ease-in-out infinite;
+    }
+
+    @keyframes bounce-gentle {
+
+      0%,
+      100% {
+        transform: translateY(0);
+      }
+
+      50% {
+        transform: translateY(-8px);
+      }
+    }
+
+    .drop-title {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .drop-subtitle {
+      color: var(--text-muted);
+      font-size: 14px;
+      margin-bottom: 24px;
+    }
+
+    /* Preview Thumbnail */
+    .preview-area {
+      width: 100%;
+      height: 180px;
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--glass-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+
+    .preview-area img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+
+    .preview-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      color: var(--text-muted);
+    }
+
+    /* File Controls */
+    .file-controls {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    /* Progress Bar */
+    .progress-wrapper {
+      margin-top: 24px;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.4s ease;
+    }
+
+    .progress-wrapper.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .progress-bar {
+      height: 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 100px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: var(--gradient-primary);
+      border-radius: 100px;
+      transition: width 0.4s ease;
+      position: relative;
+    }
+
+    .progress-fill::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+      animation: shimmer 1.5s infinite;
+    }
+
+    @keyframes shimmer {
+      0% {
+        transform: translateX(-100%);
+      }
+
+      100% {
+        transform: translateX(100%);
+      }
+    }
+
+    /* Upload Info */
+    .upload-info {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px solid var(--glass-border);
+    }
+
+    .info-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* Results Column */
+    .results-column {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .results-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .results-title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .results-title h3 {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent-purple);
+      box-shadow: 0 0 12px var(--accent-purple);
+    }
+
+    .status-dot.success {
+      background: var(--accent-emerald);
+      box-shadow: 0 0 12px var(--accent-emerald);
+    }
+
+    /* KPI Cards */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .kpi-card {
+      padding: 20px;
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: var(--radius-md);
+      border: 1px solid var(--glass-border);
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .kpi-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      background: var(--gradient-primary);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .kpi-card:hover {
+      background: rgba(255, 255, 255, 0.04);
+      transform: translateY(-4px);
+    }
+
+    .kpi-card:hover::before {
+      opacity: 1;
+    }
+
+    .kpi-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .kpi-value {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    /* ML Panel */
+    .ml-panel {
+      border-radius: var(--radius-md);
+      border: 1px solid var(--glass-border);
+      overflow: hidden;
+    }
+
+    .ml-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      background: rgba(255, 255, 255, 0.02);
+      cursor: pointer;
+      transition: background 0.3s ease;
+    }
+
+    .ml-header:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .ml-header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .ml-badge {
+      padding: 6px 12px;
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(6, 182, 212, 0.2));
+      border: 1px solid rgba(139, 92, 246, 0.3);
+      border-radius: 100px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--accent-purple);
+    }
+
+    .ml-body {
+      padding: 0;
+      max-height: 0;
+      overflow: hidden;
+      transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .ml-body.open {
+      padding: 20px;
+      max-height: 600px;
+    }
+
+    .ml-content {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .ml-section {
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: var(--radius-sm);
+      padding: 16px;
+    }
+
+    .ml-section-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+
+    /* Output Areas */
+    .output-box {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-sm);
+      padding: 16px;
+      font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #e4e4e7;
+      white-space: pre-wrap;
+      word-break: break-word;
+      min-height: 100px;
+      max-height: 300px;
+      overflow: auto;
+    }
+
+    .output-box::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .output-box::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .output-box::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+    }
+
+    /* Action Buttons Row */
+    .action-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding-top: 16px;
+      border-top: 1px solid var(--glass-border);
+    }
+
+    .action-group {
+      display: flex;
+      gap: 10px;
+    }
+
+    /* Output Section */
+    .output-section {
+      margin-top: 16px;
+    }
+
+    .output-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Footer */
+    .footer {
+      margin-top: 60px;
+      padding: 32px 0;
+      text-align: center;
+      border-top: 1px solid var(--glass-border);
+    }
+
+    .footer-content {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    .footer-heart {
+      color: var(--accent-pink);
+      animation: heartbeat 1.5s ease-in-out infinite;
+    }
+
+    @keyframes heartbeat {
+
+      0%,
+      100% {
+        transform: scale(1);
+      }
+
+      50% {
+        transform: scale(1.2);
+      }
+    }
+
+    /* Responsive */
+    @media (max-width: 1024px) {
+      .hero {
+        grid-template-columns: 1fr;
+        text-align: center;
+        gap: 40px;
+      }
+
+      .lead {
+        margin: 0 auto;
+      }
+
+      .cta-group {
+        justify-content: center;
+      }
+
+      .feature-pills {
+        justify-content: center;
+      }
+
+      .app-shell {
+        grid-template-columns: 1fr;
+      }
+
+      .kpi-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .ml-content {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .container {
+        padding: 20px 16px;
+      }
+
+      h1 {
+        font-size: 32px;
+      }
+
+      .demo-row {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .visual-stats {
+        grid-template-columns: 1fr;
+      }
+
+      .action-row {
+        flex-direction: column;
+      }
+
+      .action-group {
+        width: 100%;
+        justify-content: center;
+      }
+    }
+
+    /* Utility Classes */
+    .hidden {
+      display: none !important;
+    }
+
+    .muted {
+      color: var(--text-muted);
+    }
+
+    .text-sm {
+      font-size: 13px;
+    }
+
+    /* Floating Particles */
+    .particles {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 2;
+      overflow: hidden;
+    }
+
+    .particle {
+      position: absolute;
+      width: 4px;
+      height: 4px;
+      background: rgba(139, 92, 246, 0.5);
+      border-radius: 50%;
+      animation: float-particle 15s linear infinite;
+    }
+
+    @keyframes float-particle {
+      0% {
+        transform: translateY(100vh) translateX(0) rotate(0deg);
+        opacity: 0;
+      }
+
+      10% {
+        opacity: 1;
+      }
+
+      90% {
+        opacity: 1;
+      }
+
+      100% {
+        transform: translateY(-100vh) translateX(100px) rotate(720deg);
+        opacity: 0;
+      }
+    }
+
+    /* Icon animations */
+    .icon-spin {
+      animation: spin 8s linear infinite;
+    }
+
+    @keyframes spin {
+      from {
+        transform: rotate(0deg);
+      }
+
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* Tooltip */
+    .tooltip {
+      position: relative;
+    }
+
+    .tooltip::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.9);
+      border-radius: 6px;
+      font-size: 12px;
+      white-space: nowrap;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.2s ease;
+    }
+
+    .tooltip:hover::after {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    /* Ripple effect */
+    .ripple {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .ripple::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 0;
+      height: 0;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      transition: width 0.6s, height 0.6s;
+    }
+
+    .ripple:active::after {
+      width: 200%;
+      height: 200%;
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Animated Background -->
+  <div class="bg-animation">
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+    <div class="bg-orb orb-3"></div>
+  </div>
+
+  <!-- Grid Pattern -->
+  <div class="grid-pattern"></div>
+
+  <!-- Floating Particles -->
+  <div class="particles" id="particles"></div>
+
+  <div class="container">
+    <!-- Hero Section -->
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-content">
+        <div class="badge">
+          <span class="badge-dot"></span>
+          <span>Completely implemented using AI & ML Libraries</span>
+        </div>
+        <h1 id="hero-title">
+          Intelligent Legal Document Analyzer<br />
+          <span class="gradient-text">Using AI & ML Libraries</span>
+        </h1>
+
+        <p class="lead">
+          Upload agreements (images or PDFs). Experience lightning-fast OCR, intelligent field extraction, and
+          ML-powered insights — all wrapped in a delightful interface.
+        </p>
+
+        <div class="cta-group">
+          <button class="btn btn-primary ripple" id="openAppBtn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+            Try the Extractor
+          </button>
+          <button class="btn btn-secondary" id="learnBtn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            How it Works
+          </button>
+        </div>
+
+        <div class="feature-pills">
+          <div class="pill">
+            <span class="pill-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-emerald)"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+            </span>
+            Secure
+          </div>
+          <div class="pill">
+            <span class="pill-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path
+                  d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24" />
+              </svg>
+            </span>
+            Works Offline & Online
+          </div>
+          <div class="pill">
+            <span class="pill-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-pink)" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+              </svg>
+            </span>
+            Lightning Fast
+          </div>
+        </div>
+      </div>
+
+      <!-- Hero Visual -->
+      <div class="hero-visual">
+        <div class="visual-card glass-card">
+          <div style="width:300px; height:300px; overflow:hidden;">
+            <iframe src="https://lottie.host/embed/de5a8dc6-7f01-4c38-a906-e9cb60de082d/JQ5HzXbMfI.lottie"
+              style="width:100%; height:100%; border:0;" allow="autoplay"></iframe>
+          </div>
+
+
+          <div class="visual-stats">
+            <div class="stat-item">
+              <div class="stat-value">78%</div>
+              <div class="stat-label">Accuracy</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value">&lt;10s</div>
+              <div class="stat-label">Processing</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value">Limited</div>
+              <div class="stat-label">Formats</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Demo Toggle Area -->
+    <div class="demo-area glass-card">
+      <div class="demo-row">
+        <div class="toggle-wrapper">
+          <input type="checkbox" class="toggle" id="demoToggle" aria-label="Demo mode" />
+          <label for="demoToggle" class="text-sm muted" style="cursor: pointer;">Enable Demo Mode (synthesized
+            sample)</label>
+        </div>
+
+        <button class="btn btn-primary btn-small ripple" id="quickTry">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          Load Sample
+        </button>
+
+        <div class="status-chip" id="svcStatus">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+          Idle
+        </div>
+      </div>
+    </div>
+
+    <!-- App Shell -->
+    <section id="app" class="app-shell hidden" aria-hidden="true" aria-label="Bond extractor app">
+      <!-- Upload Card -->
+      <div class="upload-card glass-card">
+        <div id="drop" class="drop-zone" tabindex="0" aria-label="Drop file here">
+          <div class="drop-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+          </div>
+
+          <div class="drop-title">Drag & Drop Your Bond</div>
+          <div class="drop-subtitle">Images & PDFs supported • Best results with clear scans</div>
+
+          <div class="preview-area" id="thumb">
+            <div class="preview-placeholder">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5"
+                stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <polyline points="21 15 16 10 5 21" />
+              </svg>
+              <span>No file selected</span>
+            </div>
+          </div>
+
+          <input id="fileInput" type="file" accept="image/*,.pdf" style="display:none" />
+
+          <div class="file-controls">
+            <button class="btn btn-primary ripple" id="chooseBtn">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+                <polyline points="13 2 13 9 20 9" />
+              </svg>
+              Choose File
+            </button>
+            <button class="btn btn-secondary ripple" id="analyzeBtn" disabled>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+              </svg>
+              Analyze
+            </button>
+            <button class="btn btn-secondary ripple" id="clearBtn" style="display:none">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+              Clear
+            </button>
+          </div>
+
+          <div class="progress-wrapper" id="progressBar">
+            <div class="progress-bar">
+              <div class="progress-fill" id="progressInner" style="width: 0%"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="upload-info">
+          <div class="info-item">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+              <line x1="8" y1="21" x2="16" y2="21" />
+              <line x1="12" y1="17" x2="12" y2="21" />
+            </svg>
+            <span>Pages: <strong id="pagesCount">—</strong></span>
+          </div>
+          <div class="info-item">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+            </svg>
+            <span id="backendInfo">Tesseract • Heuristics</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Results Column -->
+      <div class="results-column">
+        <div class="glass-card" style="padding: 24px;">
+          <div class="results-header">
+            <div class="results-title">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent-purple)" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+                <polyline points="10 9 9 9 8 9" />
+              </svg>
+              <h3>Extraction Results</h3>
+            </div>
+            <div class="status-indicator">
+              <span class="status-dot" id="statusDot"></span>
+              <span class="text-sm muted" id="statusText">Ready</span>
+            </div>
+          </div>
+
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <div class="kpi-label">Purpose</div>
+              <div class="kpi-value" id="kPurpose">—</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label">Duration</div>
+              <div class="kpi-value" id="kDuration">—</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label">Parties</div>
+              <div class="kpi-value" id="kParties">—</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ML Panel -->
+        <div class="glass-card" style="padding: 0;">
+          <div class="ml-panel">
+            <div class="ml-header" id="toggleML">
+              <div class="ml-header-left">
+                <span class="ml-badge">AI</span>
+                <span style="font-weight: 600;">ML Insights</span>
+                <span class="text-sm muted">Summary & Entities</span>
+              </div>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" id="mlChevron" style="transition: transform 0.3s ease;">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </div>
+
+            <div class="ml-body" id="mlBody">
+              <div class="ml-content">
+                <div class="ml-section">
+                  <div class="ml-section-title">AI Summary</div>
+                  <div class="output-box" id="mlSummary">No AI summary available.</div>
+                </div>
+                <div class="ml-section">
+                  <div class="ml-section-title">Entities & Scores</div>
+                  <div class="output-box" id="mlEntities">No entities detected.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Output Section -->
+        <div class="glass-card" style="padding: 24px;">
+          <div class="action-row" style="border: none; padding-top: 0; margin-bottom: 20px;">
+            <div class="action-group">
+              <button class="btn btn-secondary btn-small ripple" id="copyJSON" disabled>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+                Copy JSON
+              </button>
+              <button class="btn btn-secondary btn-small ripple" id="copyML" disabled>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+                Copy ML
+              </button>
+            </div>
+            <div class="action-group">
+              <button class="btn btn-secondary btn-small ripple" id="downloadJSON" disabled>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Download
+              </button>
+              <button class="btn btn-primary btn-small ripple" id="exportPdf" disabled>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
+                Export PDF
+              </button>
+            </div>
+          </div>
+
+          <div class="output-section">
+            <div class="output-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="4 7 4 4 20 4 20 7" />
+                <line x1="9" y1="20" x2="15" y2="20" />
+                <line x1="12" y1="4" x2="12" y2="20" />
+              </svg>
+              Extracted Text (OCR)
+            </div>
+            <div class="output-box" id="textOut">No extracted text.</div>
+          </div>
+
+          <div class="output-section">
+            <div class="output-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-pink)" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="16 18 22 12 16 6" />
+                <polyline points="8 6 2 12 8 18" />
+              </svg>
+              Extraction JSON
+            </div>
+            <pre class="output-box" id="jsonOut">{ }</pre>
+          </div>
+
+          <div class="action-row">
+            <span class="text-sm muted">Pages processed: <strong id="pagesLabel">—</strong></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="footer-content">
+        Built with <span class="footer-heart">❤️</span> — Tesseract + Heuristics + Local ML • UX: playful & professional
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    // Generate floating particles
+    function createParticles() {
+      const container = document.getElementById('particles');
+      const particleCount = 30;
+
+      for (let i = 0; i < particleCount; i++) {
+        const particle = document.createElement('div');
+        particle.className = 'particle';
+        particle.style.left = Math.random() * 100 + '%';
+        particle.style.animationDelay = Math.random() * 15 + 's';
+        particle.style.animationDuration = (15 + Math.random() * 10) + 's';
+        particle.style.opacity = Math.random() * 0.5 + 0.2;
+        particle.style.width = (2 + Math.random() * 4) + 'px';
+        particle.style.height = particle.style.width;
+
+        const colors = ['rgba(139, 92, 246, 0.6)', 'rgba(6, 182, 212, 0.6)', 'rgba(236, 72, 153, 0.6)'];
+        particle.style.background = colors[Math.floor(Math.random() * colors.length)];
+
+        container.appendChild(particle);
+      }
+    }
+    createParticles();
+
+    // ---------- Elements ----------
+    const openAppBtn = document.getElementById('openAppBtn');
+    const app = document.getElementById('app');
+    const demoToggle = document.getElementById('demoToggle');
+    const quickTry = document.getElementById('quickTry');
+    const chooseBtn = document.getElementById('chooseBtn');
+    const fileInput = document.getElementById('fileInput');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const drop = document.getElementById('drop');
+    const thumb = document.getElementById('thumb');
+    const progressBar = document.getElementById('progressBar');
+    const progressInner = document.getElementById('progressInner');
+    const kPurpose = document.getElementById('kPurpose');
+    const kDuration = document.getElementById('kDuration');
+    const kParties = document.getElementById('kParties');
+    const textOut = document.getElementById('textOut');
+    const jsonOut = document.getElementById('jsonOut');
+    const mlSummary = document.getElementById('mlSummary');
+    const mlEntities = document.getElementById('mlEntities');
+    const svcStatus = document.getElementById('svcStatus');
+    const statusText = document.getElementById('statusText');
+    const statusDot = document.getElementById('statusDot');
+    const pagesCount = document.getElementById('pagesCount');
+    const pagesLabel = document.getElementById('pagesLabel');
+    const copyJSON = document.getElementById('copyJSON');
+    const downloadJSON = document.getElementById('downloadJSON');
+    const copyML = document.getElementById('copyML');
+    const exportPdf = document.getElementById('exportPdf');
+    const toggleML = document.getElementById('toggleML');
+    const mlBody = document.getElementById('mlBody');
+    const mlChevron = document.getElementById('mlChevron');
+    const backendInfo = document.getElementById('backendInfo');
+
+    // state
+    let selectedFile = null;
+    let lastResult = null;
+    let demoMode = false;
+
+    // ---------- Helpers ----------
+    function showApp(openFocus = true) {
+      app.classList.remove('hidden');
+      app.setAttribute('aria-hidden', 'false');
+      if (openFocus) window.scrollTo({ top: app.offsetTop - 40, behavior: 'smooth' });
+    }
+
+    function setStatus(s, color) {
+      svcStatus.innerHTML = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12 6 12 12 16 14"/>
+        </svg>
+        ${s}
+      `;
+      statusText.innerText = s;
+      if (color) statusDot.style.background = color;
+      if (s === 'Done' || s === 'Results Ready') {
+        statusDot.classList.add('success');
+      } else {
+        statusDot.classList.remove('success');
+      }
+    }
+
+    function resetUI() {
+      selectedFile = null;
+      lastResult = null;
+      thumb.innerHTML = `
+        <div class="preview-placeholder">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+          </svg>
+          <span>No file selected</span>
+        </div>
+      `;
+      analyzeBtn.disabled = true;
+      clearBtn.style.display = 'none';
+      progressBar.classList.remove('visible');
+      progressInner.style.width = '0%';
+      kPurpose.innerText = '—';
+      kDuration.innerText = '—';
+      kParties.innerText = '—';
+      mlSummary.innerText = 'No AI summary available.';
+      mlEntities.innerText = 'No entities detected.';
+      textOut.innerText = 'No extracted text.';
+      jsonOut.innerText = '{ }';
+      pagesCount.innerText = '—';
+      pagesLabel.innerText = '—';
+      copyJSON.disabled = true;
+      downloadJSON.disabled = true;
+      copyML.disabled = true;
+      exportPdf.disabled = true;
+    }
+
+    // ---------- Bind events ----------
+    openAppBtn.addEventListener('click', () => { showApp(); setStatus('Ready'); });
+    document.getElementById('learnBtn').addEventListener('click', () => {
+      alert('This UI sends the uploaded file to /upload (your FastAPI). Tesseract does local OCR on server; optional ML (HF/Gemini) enriches the output.');
+    });
+
+    demoToggle.addEventListener('change', (e) => {
+      demoMode = e.target.checked;
+      setStatus(demoMode ? 'Demo mode' : 'Ready');
+    });
+
+    quickTry.addEventListener('click', () => {
+      demoToggle.checked = true;
+      demoMode = true;
+      showApp();
+      loadSampleFile();
+    });
+
+    chooseBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (ev) => {
+      const f = ev.target.files[0];
+      if (f) loadSelectedFile(f);
+    });
+
+    // drag & drop
+    drop.addEventListener('dragenter', (e) => { e.preventDefault(); drop.classList.add('drag'); });
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); });
+    drop.addEventListener('dragleave', (e) => { e.preventDefault(); drop.classList.remove('drag'); });
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault(); drop.classList.remove('drag');
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) loadSelectedFile(f);
+    });
+
+    clearBtn.addEventListener('click', resetUI);
+
+    toggleML.addEventListener('click', () => {
+      mlBody.classList.toggle('open');
+      mlChevron.style.transform = mlBody.classList.contains('open') ? 'rotate(180deg)' : 'rotate(0deg)';
+    });
+
+    copyJSON.addEventListener('click', () => {
+      if (!lastResult) return;
+      navigator.clipboard.writeText(JSON.stringify(lastResult, null, 2));
+      setStatus('Copied JSON');
+      setTimeout(() => setStatus('Done'), 1200);
+    });
+
+    copyML.addEventListener('click', () => {
+      if (!lastResult || !lastResult.fields || !lastResult.fields.ml) return;
+      navigator.clipboard.writeText(JSON.stringify(lastResult.fields.ml, null, 2));
+      setStatus('Copied ML output');
+      setTimeout(() => setStatus('Done'), 1200);
+    });
+
+    downloadJSON.addEventListener('click', () => {
+      if (!lastResult) return;
+      const blob = new Blob([JSON.stringify(lastResult, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'extraction.json'; a.click();
+      URL.revokeObjectURL(url);
+      setStatus('Downloaded JSON');
+      setTimeout(() => setStatus('Done'), 1000);
+    });
+
+    exportPdf.addEventListener('click', () => {
+      alert('PDF export will place the extracted fields into a simple PDF. (Feature stubbed — server-side needed.)');
+    });
+
+    // ---------- File handling ----------
+    function loadSelectedFile(f) {
+      selectedFile = f;
+      clearBtn.style.display = 'inline-flex';
+      analyzeBtn.disabled = false;
+      const sizeKb = Math.round(f.size / 1024);
+      // thumbnail
+      if (f.type.startsWith('image/')) {
+        const url = URL.createObjectURL(f);
+        thumb.innerHTML = '<img src="' + url + '" alt="preview" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;"/>';
+      } else {
+        thumb.innerHTML = '<div class="preview-placeholder"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent-pink)" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><span>PDF selected — first page will be used</span></div>';
+      }
+      setStatus('Ready to upload');
+    }
+
+    function loadSampleFile() {
+      // create synthetic sample image (canvas)
+      const canvas = document.createElement('canvas');
+      canvas.width = 1200; canvas.height = 360;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#111'; ctx.font = '30px Inter, sans-serif';
+      ctx.fillText('This is a sample lease agreement for 5 years between A and B.', 28, 160);
+      canvas.toBlob((b) => {
+        const file = new File([b], 'demo_sample.png', { type: 'image/png' });
+        loadSelectedFile(file);
+      }, 'image/png');
+    }
+
+    // ---------- Upload & analyze (connects to /upload) ----------
+    async function analyzeFile() {
+      if (!selectedFile) return alert('Choose a file first');
+
+      setStatus('Uploading…', 'var(--accent-purple)');
+      progressBar.classList.add('visible');
+      progressInner.style.width = '8%';
+      analyzeBtn.disabled = true;
+
+      // simple animated progress
+      let pct = 8;
+      const anim = setInterval(() => { pct = Math.min(88, pct + (Math.random() * 12)); progressInner.style.width = pct + '%'; }, 420);
+
+      try {
+        // If in demo mode handle locally (simulate)
+        if (demoMode) {
+          // simulate network & result
+          await new Promise(r => setTimeout(r, 800));
+          clearInterval(anim);
+          progressInner.style.width = '100%';
+          const fake = {
+            method_used: "Tesseract",
+            pages_ocr: 1,
+            extracted_text: "This is a sample lease agreement for 5 years between A and B.\n",
+            fields: {
+              purpose: "Lease Agreement",
+              duration: "5 years",
+              dates: ["2025-12-05"],
+              parties: ["A", "B"],
+              amounts: [],
+              summary: "This is a sample lease agreement for 5 years between A and B.",
+              raw_text_length: 62,
+              ml: {
+                summary: "This is a sample lease agreement for 5 years between A and B. The lease agreement is based on a five-year lease agreement between the two parties.",
+                entities: [{ "type": "PERSON", "value": "A" }, { "type": "PERSON", "value": "B" }, { "type": "DATE", "value": "2025-12-05" }],
+                purpose: "Lease Agreement",
+                purpose_scores: { "Lease Agreement": 1, "Sale Agreement": 0, "Mortgage/Loan": 0, "Power of Attorney": 0, "Agreement/Other": 1, "Unknown": 0 }
+              }
+            }
+          };
+          handleResult(fake);
+          setStatus('Done', 'var(--accent-emerald)');
+          setTimeout(() => progressBar.classList.remove('visible'), 300);
+          return;
+        }
+
+        // real upload to server
+        const fd = new FormData();
+        fd.append('file', selectedFile, selectedFile.name);
+
+        const resp = await fetch('/upload', { method: 'POST', body: fd });
+        clearInterval(anim);
+        progressInner.style.width = '100%';
+        setTimeout(() => progressBar.classList.remove('visible'), 300);
+
+        if (!resp.ok) {
+          const txt = await resp.text();
+          throw new Error(resp.status + ' — ' + txt);
+        }
+        const j = await resp.json();
+        handleResult(j);
+        setStatus('Done', 'var(--accent-emerald)');
+      } catch (err) {
+        console.error(err);
+        setStatus('Error', 'var(--accent-pink)');
+        alert('Upload failed: ' + (err.message || err));
+        analyzeBtn.disabled = false;
+        progressBar.classList.remove('visible');
+      }
+    }
+
+    function handleResult(j) {
+      lastResult = j;
+      // Fields
+      const fields = (j.fields || {});
+      kPurpose.innerText = fields.purpose || '—';
+      kDuration.innerText = fields.duration || '—';
+      kParties.innerText = (fields.parties && fields.parties.length) ? fields.parties.join(' • ') : '—';
+      textOut.innerText = j.extracted_text || 'No extracted text.';
+      jsonOut.innerText = JSON.stringify(fields, null, 2);
+
+      // ML
+      const ml = fields.ml || {};
+      mlSummary.innerText = ml.summary || 'No AI summary available.';
+      // Entities: pretty display
+      if (ml.entities && ml.entities.length) {
+        mlEntities.innerText = ml.entities.map(e => `${e.type}: ${e.value}`).join('\n');
+      } else {
+        mlEntities.innerText = 'No entities detected.';
+      }
+      // Purpose scores
+      if (ml.purpose_scores) {
+        // append purpose scores into entities area
+        const scoresPretty = Object.entries(ml.purpose_scores).map(([k, v]) => `${k}: ${v}`).join('\n');
+        mlEntities.innerText += '\n\nPurpose scores:\n' + scoresPretty;
+      }
+
+      pagesCount.innerText = j.pages_ocr || 1;
+      pagesLabel.innerText = j.pages_ocr || 1;
+
+      // enable actions
+      copyJSON.disabled = false;
+      downloadJSON.disabled = false;
+      copyML.disabled = false;
+      exportPdf.disabled = false;
+
+      // show backend detail if provided
+      backendInfo.innerText = j.method_used ? j.method_used + ' • Heuristics' : 'Tesseract • Heuristics';
+
+      analyzeBtn.disabled = false;
+      setStatus('Results Ready', 'var(--accent-emerald)');
+    }
+
+    // ---------- initial / UX ----------
+    resetUI();
+    // open app if user navigated with hash
+    if (location.hash === '#app') showApp(false);
+
+    // wire analyze button
+    analyzeBtn.addEventListener('click', analyzeFile);
+
+    // Auto-show app on open
+    openAppBtn.addEventListener('click', () => { showApp(true); });
+
+    // Accessibility: keyboard activation for drop area
+    drop.addEventListener('keydown', (e) => { if (e.key === 'Enter') fileInput.click(); });
+
+    // expose small global for debugging
+    window._bondExtractor = {
+      loadSampleFile, analyzeFile, resetUI
+    };
+  </script>
+</body>
+
+</html>
+
+
+
+#########################################################
+NEW with pdf
+# app.py — Bond Extractor (OCR + Hybrid OCR: Tesseract → PaddleOCR → TrOCR) + local ML + optional Gemini/HF
+import os
+import io
+import re
+import json
+import time
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
+import pytesseract
+from dateutil import parser as dateparser
+
+# --- configure Tesseract path (update if yours differs) ---
+# If Tesseract is installed but not in PATH, set this to the absolute path to tesseract.exe
+# Example: r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# If left as None, we'll try shutil.which and fallback to default behaviour.
+TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"  # <-- adjust if needed
+if TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
+# PDF support
+# PDF support
+try:
+    import pypdfium2 as pdfium
+    PDF_LIB_AVAILABLE = True
+except ImportError:
+    PDF_LIB_AVAILABLE = False
+
+# Optional external API libs
+import requests
+
+# ML libraries (lazy load later)
+_ml_loaded = False
+
+# ---------- Hybrid OCR adapters (lazy imported) ----------
+_trocr_available = None
+_trocr_pipeline = None
+
+_paddle_available = None
+_paddle_ocr = None
+
+def ensure_paddleocr():
+    """Lazy import/instantiate PaddleOCR. Returns True if available."""
+    global _paddle_available, _paddle_ocr
+    if _paddle_available is not None:
+        return _paddle_available
+    try:
+        # import inside function to avoid heavy import at startup
+        from paddleocr import PaddleOCR
+        # instantiate with safe defaults — many paddleocr releases accept these args
+        _paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en')
+        _paddle_available = True
+    except Exception as e:
+        print("PaddleOCR not available:", e)
+        _paddle_available = False
+    return _paddle_available
+
+def ocr_paddle(img: Image.Image) -> Dict[str, Any]:
+    """Run PaddleOCR and return {'text': str, 'confidence': float}."""
+    ok = ensure_paddleocr()
+    if not ok:
+        return {"text": "", "confidence": 0.0}
+    try:
+        import numpy as np
+        arr = np.array(img.convert("RGB"))
+        result = _paddle_ocr.ocr(arr, cls=False)
+        texts = []
+        confs = []
+        # result can be nested lists; handle common shapes
+        for line in result:
+            if isinstance(line, list):
+                for block in line:
+                    # block usually like [box, (text, score)]
+                    try:
+                        candidate = block[1]
+                        txt = candidate[0] if isinstance(candidate, (list, tuple)) else str(candidate)
+                        score = float(candidate[1]) if isinstance(candidate, (list, tuple)) and len(candidate) > 1 else 0.0
+                    except Exception:
+                        try:
+                            txt = str(block[1])
+                            score = 0.0
+                        except Exception:
+                            txt = ""
+                            score = 0.0
+                    if txt:
+                        texts.append(txt)
+                        # normalize to percentage style
+                        confs.append(score * 100.0 if score <= 1.0 else score)
+            elif isinstance(line, tuple) and len(line) >= 2:
+                try:
+                    txt = line[1][0]
+                    score = float(line[1][1])
+                except Exception:
+                    txt = str(line[1])
+                    score = 0.0
+                texts.append(txt)
+                confs.append(score * 100.0 if score <= 1.0 else score)
+        joined = "\n".join([t.strip() for t in texts if t.strip()])
+        avg_conf = float(sum(confs) / len(confs)) if confs else 0.0
+        return {"text": joined, "confidence": round(avg_conf, 2)}
+    except Exception as e:
+        print("PaddleOCR error:", e)
+        return {"text": "", "confidence": 0.0}
+
+def ensure_trocr():
+    """Lazy load TrOCR pipeline (image-to-text)."""
+    global _trocr_available, _trocr_pipeline
+    if _trocr_available is not None:
+        return _trocr_available
+    try:
+        from transformers import pipeline
+        # Use CPU (-1). If you have GPU change device accordingly.
+        _trocr_pipeline = pipeline("image-to-text", model="microsoft/trocr-base-handwritten", device=-1)
+        _trocr_available = True
+    except Exception as e:
+        print("TrOCR pipeline not available:", e)
+        _trocr_available = False
+    return _trocr_available
+
+def ocr_trocr(img: Image.Image) -> Dict[str, Any]:
+    """Run TrOCR (Vision->Text) pipeline. Returns dict with text+confidence heuristic."""
+    ok = ensure_trocr()
+    if not ok:
+        return {"text": "", "confidence": 0.0}
+    try:
+        # Some pipeline versions accept lists, some accept images; pass PIL image directly
+        res = _trocr_pipeline(img)
+        if isinstance(res, list) and res:
+            # typical return: [{"generated_text": "...", ...}] or list of strings
+            if isinstance(res[0], dict):
+                txts = [r.get("generated_text", "") for r in res]
+            else:
+                txts = [str(r) for r in res]
+            joined = " ".join([t.strip() for t in txts if t.strip()])
+            # There's no confidence in many TrOCR outputs — use heuristic
+            return {"text": joined, "confidence": 60.0}
+        # fallback
+        return {"text": str(res), "confidence": 60.0}
+    except Exception as e:
+        print("TrOCR error:", e)
+        return {"text": "", "confidence": 0.0}
+
+# ----------------- Utilities -----------------
+def convert_file_to_images(data: bytes) -> List[Image.Image]:
+    """Return list of PIL images for given file bytes (image or PDF pages)."""
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        return [img]
+    except Exception:
+        pass
+
+    if PDF_LIB_AVAILABLE:
+        try:
+            pdf = pdfium.PdfDocument(data)
+            out_imgs = []
+            for i in range(len(pdf)):
+                page = pdf[i]
+                # Render page to image (scale=3 roughly equals 200-220 DPI)
+                bitmap = page.render(scale=3)
+                out_imgs.append(bitmap.to_pil())
+            return out_imgs
+        except Exception as e:
+            raise HTTPException(400, f"Could not convert PDF: {e}")
+
+    raise HTTPException(400, "Unsupported file. Install pypdfium2 for PDF support or upload an image.")
+
+def ocr_tesseract(img: Image.Image) -> Dict[str, Any]:
+    """Run Tesseract OCR and return text + naive confidence (0-100)."""
+    try:
+        txt = pytesseract.image_to_string(img) or ""
+        # pytesseract doesn't return confidence easily; use mean of confidences from hOCR if needed.
+        # For simplicity we set heuristic confidence if text length is small/large
+        conf = 70.0 if len(txt.strip()) > 10 else 30.0
+        return {"text": txt, "confidence": conf}
+    except Exception as e:
+        print("pytesseract error:", e)
+        return {"text": "", "confidence": 0.0}
+
+def hybrid_ocr_image(img: Image.Image, engines: List[str] = None) -> Dict[str, Any]:
+    """
+    Try multiple OCR engines in order and return best result plus details.
+    engines: list like ['tesseract','paddle','trocr'] - default hybrid order.
+    Returns:
+      {
+        'text': str, 'confidence': float,
+        'used': 'paddle', 'details': [ {engine, text, confidence, time_ms}, ... ]
+      }
+    """
+    if engines is None:
+        engines = ['tesseract', 'paddle', 'trocr']
+
+    details = []
+    best_text = ""
+    best_conf = -1.0
+    used_engine = None
+
+    for eng in engines:
+        start = time.time()
+        try:
+            if eng == 'tesseract':
+                out = ocr_tesseract(img)
+            elif eng == 'paddle':
+                out = ocr_paddle(img)
+            elif eng == 'trocr':
+                out = ocr_trocr(img)
+            else:
+                out = {"text": "", "confidence": 0.0}
+        except Exception as e:
+            out = {"text": "", "confidence": 0.0}
+            print(f"Engine {eng} failed:", e)
+        elapsed = int((time.time() - start) * 1000)
+        details.append({
+            "engine": eng,
+            "text_snippet": (out.get("text") or "")[:300],
+            "full_text": out.get("text") or "",
+            "confidence": float(out.get("confidence") or 0.0),
+            "time_ms": elapsed
+        })
+        # choose best by confidence then by length heuristic
+        conf = float(out.get("confidence") or 0.0)
+        txt = (out.get("text") or "").strip()
+        score = conf + min(len(txt), 100) * 0.1  # small boost for longer text
+        if score > best_conf:
+            best_conf = score
+            best_text = txt
+            used_engine = eng
+
+        # quick accept if high confidence and non-empty
+        if conf >= 85.0 and txt:
+            used_engine = eng
+            break
+
+    return {
+        "text": best_text,
+        "confidence": round(best_conf, 2) if best_conf >= 0 else 0.0,
+        "used": used_engine,
+        "details": details
+    }
+
+def simple_summary(text: str, max_chars: int = 300) -> str:
+    if not text:
+        return ""
+    sentences = re.split(r'(?<=[.!?])\s+', text.replace("\n", " "))
+    out = []
+    total = 0
+    for s in sentences:
+        s2 = s.strip()
+        if s2:
+            out.append(s2)
+            total += len(s2)
+            if total > max_chars:
+                break
+    return " ".join(out).strip()
+
+# ----------------- Heuristics fields -----------------
+def extract_duration(text: str) -> Optional[str]:
+    patterns = [
+        r'(\d{1,2}\s*(?:years|year|yrs|yr))',
+        r'period of\s+(\d{1,2}\s*(?:years|year|yrs|yr))',
+        r'for\s+(\d{1,2}\s*(?:years|year|yrs|yr))'
+    ]
+    for p in patterns:
+        m = re.search(p, text, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
+
+def extract_dates(text: str) -> List[str]:
+    dates = []
+    date_like = re.findall(r'\b(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s+\w+\s+\d{4}|\w+\s+\d{1,2},\s*\d{4})\b', text)
+    for d in date_like:
+        try:
+            parsed = dateparser.parse(d, fuzzy=True)
+            dates.append(parsed.strftime("%Y-%m-%d"))
+        except Exception:
+            pass
+    chunks = re.split(r'[\n\r]+', text)[:10]
+    for chunk in chunks:
+        try:
+            parsed = dateparser.parse(chunk, fuzzy=True)
+            if parsed:
+                dt = parsed.strftime("%Y-%m-%d")
+                if dt not in dates:
+                    dates.append(dt)
+        except Exception:
+            pass
+    return dates
+
+def extract_parties(text: str) -> List[str]:
+    t = text[:2000]
+    patterns = [
+        r'between\s+(.{1,120}?)\s+and\s+(.{1,120}?)\.',
+        r'by and between\s+(.{1,120}?)\s+and\s+(.{1,120}?)\.',
+        r'between\s+(.{1,120}?)\s+and\s+(.{1,120}?)\n',
+    ]
+    for p in patterns:
+        m = re.search(p, t, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            a = re.sub(r'\s+', ' ', m.group(1)).strip()
+            b = re.sub(r'\s+', ' ', m.group(2)).strip()
+            return [a, b]
+    names = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b', t)
+    unique = []
+    for n in names:
+        if len(n) > 2 and n.lower() not in ['this','agreement','the','whereas']:
+            if n not in unique:
+                unique.append(n)
+        if len(unique) >= 2:
+            break
+    return unique
+
+def extract_money(text: str) -> List[str]:
+    monies = re.findall(r'(?:Rs\.?|INR|₹)\s*[,\d]+(?:\.\d+)?|\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\s*(?:rupees|Rs)\b', text, flags=re.IGNORECASE)
+    return list({m.strip() for m in monies})
+
+def detect_purpose(text: str) -> Optional[str]:
+    mapping = {
+        'lease': ['lease', 'let', 'tenant', 'landlord', 'rent'],
+        'sale': ['sale', 'sold', 'purchase', 'buyer', 'seller'],
+        'mortgage': ['mortgage', 'security', 'mortgagee', 'mortgagor'],
+        'power_of_attorney': ['power of attorney', 'attorney'],
+        'agreement': ['agreement', 'whereas', 'party of the first part'],
+    }
+    text_l = text.lower()
+    scores = {}
+    for k, kws in mapping.items():
+        scores[k] = sum(1 for w in kws if w in text_l)
+    best = max(scores, key=lambda x: scores[x])
+    if scores[best] > 0:
+        labels = {
+            'lease': 'Lease Agreement',
+            'sale': 'Sale Agreement',
+            'mortgage': 'Mortgage/Loan',
+            'power_of_attorney': 'Power of Attorney',
+            'agreement': 'Agreement/Other'
+        }
+        return labels.get(best, best)
+    return None
+
+def extract_fields_from_text(text: str) -> Dict[str, Any]:
+    purpose = detect_purpose(text) or "Unknown"
+    duration = extract_duration(text)
+    dates = extract_dates(text)
+    parties = extract_parties(text)
+    money = extract_money(text)
+    summary = simple_summary(text)
+    return {
+        "purpose": purpose,
+        "duration": duration,
+        "dates": dates,
+        "parties": parties,
+        "amounts": money,
+        "summary": summary,
+        "raw_text_length": len(text)
+    }
+
+# ----------------- ML lazy-loading (summarizer, NER, embeddings) -----------------
+def load_ml_models_once():
+    global _ml_loaded
+    if _ml_loaded:
+        return
+    try:
+        from transformers import pipeline
+        from sentence_transformers import SentenceTransformer
+    except Exception as e:
+        print("Local ML libs not installed or available:", e)
+        _ml_loaded = True
+        # placeholders
+        app.state.summarizer = None
+        app.state.ner_pipe = None
+        app.state.embed_model = None
+        return
+
+    app.state.summarizer = None
+    app.state.ner_pipe = None
+    app.state.embed_model = None
+
+    print("Loading summarizer (local)...")
+    try:
+        app.state.summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+        print("Summarizer loaded.")
+    except Exception as e:
+        print("Could not load summarizer locally:", e)
+        app.state.summarizer = None
+
+    print("Loading NER (local)...")
+    try:
+        app.state.ner_pipe = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english", grouped_entities=True)
+        print("NER loaded.")
+    except Exception as e:
+        print("Primary NER load failed, trying fallback:", e)
+        try:
+            app.state.ner_pipe = pipeline("ner", model="dslim/bert-base-NER", grouped_entities=True)
+            print("Fallback NER loaded.")
+        except Exception as e2:
+            print("No local NER available:", e2)
+            app.state.ner_pipe = None
+
+    print("Loading embeddings (all-MiniLM-L6-v2)...")
+    try:
+        from sentence_transformers import SentenceTransformer
+        app.state.embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        print("Embeddings loaded.")
+    except Exception as e:
+        print("Embeddings load failed:", e)
+        app.state.embed_model = None
+
+    _ml_loaded = True
+    print("ML lazy-load complete.")
+
+def ml_summary(text: str) -> Optional[str]:
+    if not text or not text.strip():
+        return None
+    load_ml_models_once()
+    summ = None
+    try:
+        if getattr(app.state, "summarizer", None):
+            # summarizer may throw warnings if input is tiny; that's fine
+            out = app.state.summarizer(text[:4000], max_length=130, min_length=30, do_sample=False)
+            if isinstance(out, list) and out:
+                summ = out[0].get("summary_text")
+    except Exception as e:
+        print("Local summarizer error:", e)
+        summ = None
+    if not summ:
+        return simple_summary(text, max_chars=400)
+    return summ
+
+def ml_entities(text: str) -> List[Dict[str, Any]]:
+    if not text or not text.strip():
+        return []
+    load_ml_models_once()
+    try:
+        ner = getattr(app.state, "ner_pipe", None)
+        if ner:
+            out = ner(text[:2000])
+            cleaned = []
+            for ent in out:
+                cleaned.append({
+                    "entity_group": ent.get("entity_group") or ent.get("entity"),
+                    "word": ent.get("word") or ent.get("entity"),
+                    "score": float(ent.get("score", 0.0))
+                })
+            return cleaned
+    except Exception as e:
+        print("Local NER error:", e)
+    return []
+
+def ml_purpose_scores(text: str) -> Dict[str, Any]:
+    labels = ["Lease Agreement", "Sale Agreement", "Mortgage/Loan", "Power of Attorney", "Agreement/Other", "Unknown"]
+    keywords = {
+        "Lease Agreement": ["lease", "tenant", "landlord", "rent"],
+        "Sale Agreement": ["sale", "buyer", "seller", "sold", "purchase"],
+        "Mortgage/Loan": ["mortgage", "loan", "security", "mortgagor", "mortgagee"],
+        "Power of Attorney": ["power of attorney", "attorney", "agent"],
+        "Agreement/Other": ["agreement", "whereas", "party of the first part"]
+    }
+    t = text.lower()
+    scores = {k: 0 for k in labels}
+    for k, kws in keywords.items():
+        scores[k] = sum(1 for kw in kws if kw in t)
+    maxv = max(scores.values()) if scores else 0
+    if maxv == 0:
+        scores["Unknown"] = 1
+    else:
+        for k in scores:
+            scores[k] = round(scores[k] / (maxv if maxv > 0 else 1), 3)
+    purpose = max(scores, key=lambda x: scores[x])
+    return {"purpose": purpose, "purpose_scores": scores}
+
+# ----------------- Gemini (external) placeholder -----------------
+def call_gemini_external(text: str) -> Optional[Dict[str, Any]]:
+    if os.environ.get("GEMINI_ENABLED") != "1":
+        return None
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("Gemini enabled but GEMINI_API_KEY missing.")
+        return None
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-mini:generateContent?key=" + api_key
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": f"Extract a JSON summary (purpose, parties, amounts, dates, summary, risks) from the contract text:\n\n{text[:8000]}"
+            }]
+        }]
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=30)
+        data = r.json()
+        cand = data.get("candidates", [])
+        if cand and isinstance(cand, list):
+            text_out = cand[0].get("content", {}).get("parts", [{}])[0].get("text")
+            return {"gemini_output": text_out}
+    except Exception as e:
+        print("Gemini call failed:", e)
+    return None
+
+# ---- FastAPI app ----
+app = FastAPI(title="Bond Extractor (OCR + ML + Hybrid)")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # dev only; restrict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+print("PDF Library available:", PDF_LIB_AVAILABLE)
+print("Bond Extractor starting... (Hybrid OCR will try Tesseract → PaddleOCR → TrOCR)")
+
+# ----------------- Endpoints -----------------
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)):
+    """Upload image or PDF. Returns OCR text + heuristics + ML + optional Gemini output."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file uploaded.")
+
+    # save original upload
+    fp = os.path.join(UPLOAD_DIR, file.filename)
+    with open(fp, "wb") as f:
+        f.write(data)
+
+    # convert to images (first page or pages)
+    pages = convert_file_to_images(data)
+
+    # For each page, run hybrid OCR
+    full_text = ""
+    hybrid_details_per_page = []
+    for idx, p in enumerate(pages, start=1):
+        res = hybrid_ocr_image(p, engines=['tesseract', 'paddle', 'trocr'])
+        hybrid_details_per_page.append(res)
+        full_text += (res.get("text") or "") + "\n\n"
+
+    # heuristics
+    fields = extract_fields_from_text(full_text)
+
+    # local ML enrichments (lazy)
+    try:
+        ml_sum = ml_summary(full_text)
+        ml_ents = ml_entities(full_text)
+        ml_purpose = ml_purpose_scores(full_text)
+    except Exception as e:
+        print("ML enrichment failed:", e)
+        ml_sum = None
+        ml_ents = []
+        ml_purpose = {"purpose": None, "purpose_scores": {}}
+
+    fields["ml"] = {
+        "summary": ml_sum,
+        "entities": ml_ents,
+        "purpose": ml_purpose.get("purpose"),
+        "purpose_scores": ml_purpose.get("purpose_scores")
+    }
+
+    # optional Gemini external enrichment
+    gem = call_gemini_external(full_text)
+    if gem:
+        fields["gemini"] = gem
+
+    out = {
+        "method_used": "hybrid",  # hybrid pipeline used
+        "pages_ocr": len(pages),
+        "extracted_text": full_text,
+        "fields": fields,
+        "hybrid_details": hybrid_details_per_page
+    }
+    return JSONResponse(out)
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    path = os.path.join("static", "index.html")
+    if not os.path.exists(path):
+        return HTMLResponse("<h2>UI not found: static/index.html</h2>", status_code=404)
+    with open(path, "r", encoding="utf8") as f:
+        return HTMLResponse(f.read())
+
+@app.get("/health")
+def health():
+    # quick Tesseract check
+    import shutil
+    tpath = shutil.which("tesseract")
+    t_ok = bool(tpath)
+    return {
+        "status": "ok", 
+        "tesseract_in_path": t_ok, 
+        "tesseract_cmd_configured": pytesseract.pytesseract.tesseract_cmd,
+        "pdf_lib_available": PDF_LIB_AVAILABLE
+    }
+
+# ----------------- Helpful dev utility -----------------
+if __name__ == "__main__":
+    print("Run this with: uvicorn app:app --reload --port 8000")
+
+
+
+
+
+Hello, I'm free right now, We will continue of making project. I will paste My codes "app.py" and "index.html". 
+
+First we will mainly focus on backend functionality instead of frontend. Once the backend works in real time we will focus on Frontend. 
+
+
+
+// 23-01-2026
+
+# app.py — Bond Extractor (OCR + Hybrid OCR: Tesseract → PaddleOCR → TrOCR) + local ML + optional Gemini/HF
+import os
+import io
+import re
+import json
+import time
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
+import pytesseract
+from dateutil import parser as dateparser
+
+# --- configure Tesseract path (update if yours differs) ---
+# If Tesseract is installed but not in PATH, set this to the absolute path to tesseract.exe
+# Example: r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# If left as None, we'll try shutil.which and fallback to default behaviour.
+TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"  # <-- adjust if needed
+if TESSERACT_CMD:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
+# PDF support (via pypdfium2, no system poppler needed)
+try:
+    import pypdfium2 as pdfium
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+    print("pypdfium2 not installed. PDFs will not be accepted.")
+
+# Optional external API libs
+import requests
+
+# ML libraries (lazy load later)
+_ml_loaded = False
+
+# ---------- Hybrid OCR adapters (lazy imported) ----------
+_trocr_available = None
+_trocr_pipeline = None
+
+_paddle_available = None
+_paddle_ocr = None
+
+def ensure_paddleocr():
+    """Lazy import/instantiate PaddleOCR. Returns True if available."""
+    global _paddle_available, _paddle_ocr
+    if _paddle_available is not None:
+        return _paddle_available
+    try:
+        # import inside function to avoid heavy import at startup
+        from paddleocr import PaddleOCR
+        # instantiate with safe defaults — many paddleocr releases accept these args
+        _paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en')
+        _paddle_available = True
+    except Exception as e:
+        print("PaddleOCR not available:", e)
+        _paddle_available = False
+    return _paddle_available
+
+def ocr_paddle(img: Image.Image) -> Dict[str, Any]:
+    """Run PaddleOCR and return {'text': str, 'confidence': float}."""
+    ok = ensure_paddleocr()
+    if not ok:
+        return {"text": "", "confidence": 0.0}
+    try:
+        import numpy as np
+        arr = np.array(img.convert("RGB"))
+        result = _paddle_ocr.ocr(arr, cls=False)
+        texts = []
+        confs = []
+        # result can be nested lists; handle common shapes
+        for line in result:
+            if isinstance(line, list):
+                for block in line:
+                    # block usually like [box, (text, score)]
+                    try:
+                        candidate = block[1]
+                        txt = candidate[0] if isinstance(candidate, (list, tuple)) else str(candidate)
+                        score = float(candidate[1]) if isinstance(candidate, (list, tuple)) and len(candidate) > 1 else 0.0
+                    except Exception:
+                        try:
+                            txt = str(block[1])
+                            score = 0.0
+                        except Exception:
+                            txt = ""
+                            score = 0.0
+                    if txt:
+                        texts.append(txt)
+                        # normalize to percentage style
+                        confs.append(score * 100.0 if score <= 1.0 else score)
+            elif isinstance(line, tuple) and len(line) >= 2:
+                try:
+                    txt = line[1][0]
+                    score = float(line[1][1])
+                except Exception:
+                    txt = str(line[1])
+                    score = 0.0
+                texts.append(txt)
+                confs.append(score * 100.0 if score <= 1.0 else score)
+        joined = "\n".join([t.strip() for t in texts if t.strip()])
+        avg_conf = float(sum(confs) / len(confs)) if confs else 0.0
+        return {"text": joined, "confidence": round(avg_conf, 2)}
+    except Exception as e:
+        print("PaddleOCR error:", e)
+        return {"text": "", "confidence": 0.0}
+
+def ensure_trocr():
+    """Lazy load TrOCR pipeline (image-to-text)."""
+    global _trocr_available, _trocr_pipeline
+    if _trocr_available is not None:
+        return _trocr_available
+    try:
+        from transformers import pipeline
+        # Use CPU (-1). If you have GPU change device accordingly.
+        _trocr_pipeline = pipeline("image-to-text", model="microsoft/trocr-base-handwritten", device=-1)
+        _trocr_available = True
+    except Exception as e:
+        print("TrOCR pipeline not available:", e)
+        _trocr_available = False
+    return _trocr_available
+
+def ocr_trocr(img: Image.Image) -> Dict[str, Any]:
+    """Run TrOCR (Vision->Text) pipeline. Returns dict with text+confidence heuristic."""
+    ok = ensure_trocr()
+    if not ok:
+        return {"text": "", "confidence": 0.0}
+    try:
+        # Some pipeline versions accept lists, some accept images; pass PIL image directly
+        res = _trocr_pipeline(img)
+        if isinstance(res, list) and res:
+            # typical return: [{"generated_text": "...", ...}] or list of strings
+            if isinstance(res[0], dict):
+                txts = [r.get("generated_text", "") for r in res]
+            else:
+                txts = [str(r) for r in res]
+            joined = " ".join([t.strip() for t in txts if t.strip()])
+            # There's no confidence in many TrOCR outputs — use heuristic
+            return {"text": joined, "confidence": 60.0}
+        # fallback
+        return {"text": str(res), "confidence": 60.0}
+    except Exception as e:
+        print("TrOCR error:", e)
+        return {"text": "", "confidence": 0.0}
+
+# ----------------- Utilities -----------------
+def convert_file_to_images(data: bytes) -> List[Image.Image]:
+    """Return list of PIL images for given file bytes (image or PDF pages)."""
+    # 1. Try opening as standard image
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        return [img]
+    except Exception:
+        pass
+
+    # 2. Try opening as PDF with pypdfium2
+    if PDF_AVAILABLE:
+        try:
+            pdf = pdfium.PdfDocument(data)
+            images = []
+            # We'll render at scale=2 (approx 144 DPI) or scale=3 (216 DPI). 
+            # 300/72 ~= 4.16. Let's start with scale=3 for good OCR.
+            for i in range(len(pdf)):
+                page = pdf[i]
+                bitmap = page.render(scale=3)
+                pil_image = bitmap.to_pil().convert("RGB")
+                images.append(pil_image)
+            return images
+        except Exception as e:
+            # Not a valid PDF or error
+            # If it was meant to be a PDF, this exception is relevant
+            pass
+            # We can re-raise if we are sure it's not some other binary garbage
+            # But let's follow the pattern: checks specific headers? 
+            # pypdfium2 raises exception if not PDF.
+            
+            # If the user uploaded a broken file, we should warn them.
+            # But for now, let's assume if it failed image open, it might be PDF.
+            if data[:4] == b'%PDF':
+                 raise HTTPException(400, f"Could not convert PDF: {e}")
+
+    raise HTTPException(400, "Unsupported file type or corrupt PDF/Image.")
+
+def ocr_tesseract(img: Image.Image) -> Dict[str, Any]:
+    """Run Tesseract OCR and return text + naive confidence (0-100)."""
+    try:
+        txt = pytesseract.image_to_string(img) or ""
+        # pytesseract doesn't return confidence easily; use mean of confidences from hOCR if needed.
+        # For simplicity we set heuristic confidence if text length is small/large
+        conf = 70.0 if len(txt.strip()) > 10 else 30.0
+        return {"text": txt, "confidence": conf}
+    except Exception as e:
+        print("pytesseract error:", e)
+        return {"text": "", "confidence": 0.0}
+
+def hybrid_ocr_image(img: Image.Image, engines: List[str] = None) -> Dict[str, Any]:
+    """
+    Try multiple OCR engines in order and return best result plus details.
+    engines: list like ['tesseract','paddle','trocr'] - default hybrid order.
+    Returns:
+      {
+        'text': str, 'confidence': float,
+        'used': 'paddle', 'details': [ {engine, text, confidence, time_ms}, ... ]
+      }
+    """
+    if engines is None:
+        engines = ['tesseract', 'paddle', 'trocr']
+
+    details = []
+    best_text = ""
+    best_conf = -1.0
+    used_engine = None
+
+    for eng in engines:
+        start = time.time()
+        try:
+            if eng == 'tesseract':
+                out = ocr_tesseract(img)
+            elif eng == 'paddle':
+                out = ocr_paddle(img)
+            elif eng == 'trocr':
+                out = ocr_trocr(img)
+            else:
+                out = {"text": "", "confidence": 0.0}
+        except Exception as e:
+            out = {"text": "", "confidence": 0.0}
+            print(f"Engine {eng} failed:", e)
+        elapsed = int((time.time() - start) * 1000)
+        details.append({
+            "engine": eng,
+            "text_snippet": (out.get("text") or "")[:300],
+            "full_text": out.get("text") or "",
+            "confidence": float(out.get("confidence") or 0.0),
+            "time_ms": elapsed
+        })
+        # choose best by confidence then by length heuristic
+        conf = float(out.get("confidence") or 0.0)
+        txt = (out.get("text") or "").strip()
+        score = conf + min(len(txt), 100) * 0.1  # small boost for longer text
+        if score > best_conf:
+            best_conf = score
+            best_text = txt
+            used_engine = eng
+
+        # quick accept if high confidence and non-empty
+        if conf >= 85.0 and txt:
+            used_engine = eng
+            break
+
+    return {
+        "text": best_text,
+        "confidence": round(best_conf, 2) if best_conf >= 0 else 0.0,
+        "used": used_engine,
+        "details": details
+    }
+
+def simple_summary(text: str, max_chars: int = 300) -> str:
+    if not text:
+        return ""
+    sentences = re.split(r'(?<=[.!?])\s+', text.replace("\n", " "))
+    out = []
+    total = 0
+    for s in sentences:
+        s2 = s.strip()
+        if s2:
+            out.append(s2)
+            total += len(s2)
+            if total > max_chars:
+                break
+    return " ".join(out).strip()
+
+# ----------------- Heuristics fields -----------------
+def extract_duration(text: str) -> Optional[str]:
+    patterns = [
+        r'(\d{1,2}\s*(?:years|year|yrs|yr))',
+        r'period of\s+(\d{1,2}\s*(?:years|year|yrs|yr))',
+        r'for\s+(\d{1,2}\s*(?:years|year|yrs|yr))'
+    ]
+    for p in patterns:
+        m = re.search(p, text, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
+
+def extract_dates(text: str) -> List[str]:
+    dates = []
+    date_like = re.findall(r'\b(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s+\w+\s+\d{4}|\w+\s+\d{1,2},\s*\d{4})\b', text)
+    for d in date_like:
+        try:
+            parsed = dateparser.parse(d, fuzzy=True)
+            dates.append(parsed.strftime("%Y-%m-%d"))
+        except Exception:
+            pass
+    chunks = re.split(r'[\n\r]+', text)[:10]
+    for chunk in chunks:
+        try:
+            parsed = dateparser.parse(chunk, fuzzy=True)
+            if parsed:
+                dt = parsed.strftime("%Y-%m-%d")
+                if dt not in dates:
+                    dates.append(dt)
+        except Exception:
+            pass
+    return dates
+
+def extract_parties(text: str) -> List[str]:
+    # 1. Cleaning: Skip potential header noise (dates, "Google Gemini", "Extracted Text", etc.)
+    lines = text.split('\n')
+    start_idx = 0
+    for i in range(min(15, len(lines))):
+        line_clean = lines[i].strip()
+        if not line_clean:
+            continue
+        
+        # Check for noise markers
+        is_noise = False
+        lc = line_clean.lower()
+        if "extracted text" in lc or "lease agreement" in lc or "first page" in lc or "google" in lc or "gemini" in lc or "genin" in lc:
+            is_noise = True
+        elif len(line_clean) < 60 and (re.search(r'\d{1,2}/\d{1,2}', line_clean) or "PM" in line_clean or "AM" in line_clean):
+            is_noise = True
+            
+        if is_noise:
+            start_idx = i + 1
+        else:
+            # If we see a very short line that isn't clearly noise, it might still be garbage/header spacing
+            if len(line_clean) < 10:
+                continue
+            # Found a substantial line that isn't noise -> stop skipping
+            break
+    
+    t = "\n".join(lines[start_idx:])[:3000]
+
+    # 2. Strict "Between ... And ..." Regex (High Confidence)
+    patterns = [
+        r'(?:between|bw)\s+([\w\s\.\(\),]+?)\s+(?:and|&)\s+([\w\s\.\(\),]+?)(?:\.|,|\n|which)',
+        r'by and between\s+([\w\s\.\(\),]+?)\s+(?:and|&)\s+([\w\s\.\(\),]+?)(?:\.|,|\n|which)',
+    ]
+    for p in patterns:
+        m = re.search(p, t, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            clean_a = re.sub(r'\(.*?\)', '', m.group(1)) # remove (hereinafter...)
+            clean_b = re.sub(r'\(.*?\)', '', m.group(2))
+            a = re.sub(r'\s+', ' ', clean_a).strip(" .,")
+            b = re.sub(r'\s+', ' ', clean_b).strip(" .,")
+            if len(a) > 2 and len(b) > 2:
+                return [a, b]
+
+    # 3. Fallback: Named Entity handling (Capitalized Words)
+    # We ignore standard stopwords for contracts to avoid "This Rental Agreement" being a party
+    # Also ignore UI artifacts if the user uploads a screenshot of the tool itself (meta-case)
+    ignore = {
+        'this', 'agreement', 'the', 'whereas', 'rental', 'lease', 'sale', 'deed', 'contract', 'between', 'and', 'extracted', 'text', 'ocr',
+        'lease agreement', 'rental agreement', 'sale agreement', 'extracted text', 'purpose', 'duration', 'parties'
+    }
+    # 3. Fallback: Named Entity handling (Capitalized Words or ALL CAPS)
+    # Match Title Case (Ram Kumar) or ALL CAPS (RAM KUMAR)
+    # We ignore standard stopwords for contracts to avoid "This Rental Agreement" being a party
+    # Also ignore UI artifacts if the user uploads a screenshot of the tool itself (meta-case)
+    ignore = {
+        'this', 'agreement', 'the', 'whereas', 'rental', 'lease', 'sale', 'deed', 'contract', 'between', 'and', 'extracted', 'text', 'ocr',
+        'lease agreement', 'rental agreement', 'sale agreement', 'extracted text', 'purpose', 'duration', 'parties'
+    }
+    # Regex: [A-Z][a-z]+ (Title) OR [A-Z]{2,} (ALL CAPS)
+    # Combined with spaces.
+    # Simplified: \b[A-Z][a-zA-Z\.]+(?:\s+[A-Z][a-zA-Z\.]+){0,4}\b
+    # But be careful of "THIS IS A".
+    # Let's try two passes or a flexible one.
+    names = re.findall(r'\b([A-Z][A-Za-z\.]+(?:\s+[A-Z][A-Za-z\.]+){0,4})\b', t)
+    unique = []
+    for n in names:
+        n_lower = n.lower()
+        # check full phrase and individual words
+        if len(n) > 2 and n_lower not in ignore: 
+             # extra check: shouldn't be a month name
+             if n_lower in {'january','february','march','april','may','june','july','august','september','october','november','december'}:
+                 continue
+             
+             # check if it contains ignored generic terms like "Agreement" as the HEAD
+             # e.g. "Rental Agreement" -> ignored. "Ram Kumar" -> kept.
+             if "agreement" in n_lower or "deed" in n_lower:
+                if n_lower not in ignore: 
+                    # heuristic: purely generic agreements are ignored, but "Service Agreement" might be relevant? 
+                    # For now, let's just ignore if it's exactly "Rental Agreement" (handled by set)
+                    # or if starts with generic word
+                    pass
+
+             if n not in unique:
+                unique.append(n)
+        if len(unique) >= 2:
+            break
+    return unique
+
+def extract_money(text: str) -> List[str]:
+    monies = re.findall(r'(?:Rs\.?|INR|₹)\s*[,\d]+(?:\.\d+)?|\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\s*(?:rupees|Rs)\b', text, flags=re.IGNORECASE)
+    return list({m.strip() for m in monies})
+
+def detect_purpose(text: str) -> Optional[str]:
+    mapping = {
+        'rental': ['rental agreement', 'rent agreement', 'tenancy', 'renial'], # renial = common OCR typo
+        'lease': ['lease', 'let', 'tenant', 'landlord'],
+        'sale': ['sale', 'sold', 'purchase', 'buyer', 'seller'],
+        'mortgage': ['mortgage', 'security', 'mortgagee', 'mortgagor'],
+        'power_of_attorney': ['power of attorney', 'attorney'],
+        'agreement': ['agreement', 'whereas', 'party of the first part'],
+    }
+    text_l = text.lower()
+    scores = {}
+    for k, kws in mapping.items():
+        scores[k] = sum(1 for w in kws if w in text_l)
+    
+    # Priority Heuristic: If "Rental Agreement" or "Renial Agreement" is found explicitly, boost 'rental'
+    if 'rental agreement' in text_l or 'renial agreement' in text_l:
+        scores['rental'] += 5
+
+    best = max(scores, key=lambda x: scores[x])
+    if scores[best] > 0:
+        labels = {
+            'rental': 'Rental Agreement',
+            'lease': 'Lease Agreement',
+            'sale': 'Sale Agreement',
+            'mortgage': 'Mortgage/Loan',
+            'power_of_attorney': 'Power of Attorney',
+            'agreement': 'Agreement/Other'
+        }
+        return labels.get(best, best)
+    return None
+
+def extract_fields_from_text(text: str) -> Dict[str, Any]:
+    purpose = detect_purpose(text) or "Unknown"
+    duration = extract_duration(text)
+    dates = extract_dates(text)
+    parties = extract_parties(text)
+    money = extract_money(text)
+    summary = simple_summary(text)
+    return {
+        "purpose": purpose,
+        "duration": duration,
+        "dates": dates,
+        "parties": parties,
+        "amounts": money,
+        "summary": summary,
+        "raw_text_length": len(text)
+    }
+
+# ----------------- ML lazy-loading (summarizer, NER, embeddings) -----------------
+def load_ml_models_once():
+    global _ml_loaded
+    if _ml_loaded:
+        return
+    try:
+        from transformers import pipeline
+        from sentence_transformers import SentenceTransformer
+    except Exception as e:
+        print("Local ML libs not installed or available:", e)
+        _ml_loaded = True
+        # placeholders
+        app.state.summarizer = None
+        app.state.ner_pipe = None
+        app.state.embed_model = None
+        return
+
+    app.state.summarizer = None
+    app.state.ner_pipe = None
+    app.state.embed_model = None
+
+    print("Loading summarizer (local)...")
+    try:
+        app.state.summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+        print("Summarizer loaded.")
+    except Exception as e:
+        print("Could not load summarizer locally:", e)
+        app.state.summarizer = None
+
+    print("Loading NER (local)...")
+    try:
+        app.state.ner_pipe = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english", grouped_entities=True)
+        print("NER loaded.")
+    except Exception as e:
+        print("Primary NER load failed, trying fallback:", e)
+        try:
+            app.state.ner_pipe = pipeline("ner", model="dslim/bert-base-NER", grouped_entities=True)
+            print("Fallback NER loaded.")
+        except Exception as e2:
+            print("No local NER available:", e2)
+            app.state.ner_pipe = None
+
+    print("Loading embeddings (all-MiniLM-L6-v2)...")
+    try:
+        from sentence_transformers import SentenceTransformer
+        app.state.embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        print("Embeddings loaded.")
+    except Exception as e:
+        print("Embeddings load failed:", e)
+        app.state.embed_model = None
+
+    _ml_loaded = True
+    print("ML lazy-load complete.")
+
+def ml_summary(text: str) -> Optional[str]:
+    if not text or not text.strip():
+        return None
+    load_ml_models_once()
+    summ = None
+    try:
+        if getattr(app.state, "summarizer", None):
+            # summarizer may throw warnings if input is tiny; that's fine
+            out = app.state.summarizer(text[:4000], max_length=130, min_length=30, do_sample=False)
+            if isinstance(out, list) and out:
+                summ = out[0].get("summary_text")
+    except Exception as e:
+        print("Local summarizer error:", e)
+        summ = None
+    if not summ:
+        return simple_summary(text, max_chars=400)
+    return summ
+
+def ml_entities(text: str) -> List[Dict[str, Any]]:
+    if not text or not text.strip():
+        return []
+    load_ml_models_once()
+    try:
+        ner = getattr(app.state, "ner_pipe", None)
+        if ner:
+            out = ner(text[:2000])
+            cleaned = []
+            for ent in out:
+                # Backend usually returns 'entity_group' (BERT) or 'entity'.
+                # Frontend expects 'type' and 'value'.
+                cat = ent.get("entity_group") or ent.get("entity") or "UNKNOWN"
+                val = ent.get("word") or ent.get("entity") or ""
+                cleaned.append({
+                    "entity_group": cat,   # keep for backward compat
+                    "word": val,           # keep for backward compat
+                    "type": cat,           # <--- NEW for Frontend
+                    "value": val,          # <--- NEW for Frontend
+                    "score": float(ent.get("score", 0.0))
+                })
+            return cleaned
+    except Exception as e:
+        print("Local NER error:", e)
+    return []
+
+def ml_purpose_scores(text: str) -> Dict[str, Any]:
+    labels = ["Rental Agreement", "Lease Agreement", "Sale Agreement", "Mortgage/Loan", "Power of Attorney", "Agreement/Other", "Unknown"]
+    keywords = {
+        "Rental Agreement": ["rental", "tenancy", "rent agreement", "renial"],
+        "Lease Agreement": ["lease", "tenant", "landlord", "lessor", "lessee"],
+        "Sale Agreement": ["sale", "buyer", "seller", "sold", "purchase", "vendor"],
+        "Mortgage/Loan": ["mortgage", "loan", "security", "mortgagor", "mortgagee"],
+        "Power of Attorney": ["power of attorney", "attorney", "agent"],
+        "Agreement/Other": ["agreement", "whereas", "party of the first part"]
+    }
+    t = text.lower()
+    scores = {k: 0 for k in labels}
+    for k, kws in keywords.items():
+        scores[k] = sum(1 for kw in kws if kw in t)
+    maxv = max(scores.values()) if scores else 0
+    if maxv == 0:
+        scores["Unknown"] = 1
+    else:
+        for k in scores:
+            scores[k] = round(scores[k] / (maxv if maxv > 0 else 1), 3)
+    purpose = max(scores, key=lambda x: scores[x])
+    return {"purpose": purpose, "purpose_scores": scores}
+
+# ----------------- Gemini (external) placeholder -----------------
+def call_gemini_external(text: str) -> Optional[Dict[str, Any]]:
+    if os.environ.get("GEMINI_ENABLED") != "1":
+        return None
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("Gemini enabled but GEMINI_API_KEY missing.")
+        return None
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-mini:generateContent?key=" + api_key
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": f"Extract a JSON summary (purpose, parties, amounts, dates, summary, risks) from the contract text:\n\n{text[:8000]}"
+            }]
+        }]
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=30)
+        data = r.json()
+        cand = data.get("candidates", [])
+        if cand and isinstance(cand, list):
+            text_out = cand[0].get("content", {}).get("parts", [{}])[0].get("text")
+            return {"gemini_output": text_out}
+    except Exception as e:
+        print("Gemini call failed:", e)
+    return None
+
+# ---- FastAPI app ----
+app = FastAPI(title="Bond Extractor (OCR + ML + Hybrid)")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # dev only; restrict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+print("PDF Available (pypdfium2):", PDF_AVAILABLE)
+print("Bond Extractor starting... (Hybrid OCR will try Tesseract → PaddleOCR → TrOCR)")
+
+# ----------------- Endpoints -----------------
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)):
+    """Upload image or PDF. Returns OCR text + heuristics + ML + optional Gemini output."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file uploaded.")
+
+    # save original upload
+    fp = os.path.join(UPLOAD_DIR, file.filename)
+    with open(fp, "wb") as f:
+        f.write(data)
+
+    # convert to images (first page or pages)
+    pages = convert_file_to_images(data)
+
+    # For each page, run hybrid OCR
+    full_text = ""
+    hybrid_details_per_page = []
+    for idx, p in enumerate(pages, start=1):
+        res = hybrid_ocr_image(p, engines=['tesseract', 'paddle', 'trocr'])
+        hybrid_details_per_page.append(res)
+        full_text += (res.get("text") or "") + "\n\n"
+
+    # heuristics
+    fields = extract_fields_from_text(full_text)
+
+    # local ML enrichments (lazy)
+    try:
+        ml_sum = ml_summary(full_text)
+        ml_ents = ml_entities(full_text)
+        ml_purpose = ml_purpose_scores(full_text)
+    except Exception as e:
+        print("ML enrichment failed:", e)
+        ml_sum = None
+        ml_ents = []
+        ml_purpose = {"purpose": None, "purpose_scores": {}}
+
+    fields["ml"] = {
+        "summary": ml_sum,
+        "entities": ml_ents,
+        "purpose": ml_purpose.get("purpose"),
+        "purpose_scores": ml_purpose.get("purpose_scores")
+    }
+
+    # optional Gemini external enrichment
+    gem = call_gemini_external(full_text)
+    if gem:
+        fields["gemini"] = gem
+
+    out = {
+        "method_used": "hybrid",  # hybrid pipeline used
+        "pages_ocr": len(pages),
+        "extracted_text": full_text,
+        "fields": fields,
+        "hybrid_details": hybrid_details_per_page
+    }
+    return JSONResponse(out)
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    path = os.path.join("static", "index.html")
+    if not os.path.exists(path):
+        return HTMLResponse("<h2>UI not found: static/index.html</h2>", status_code=404)
+    with open(path, "r", encoding="utf8") as f:
+        return HTMLResponse(f.read())
+
+@app.get("/health")
+def health():
+    # quick Tesseract check
+    import shutil
+    tpath = shutil.which("tesseract")
+    t_ok = bool(tpath)
+    return {"status": "ok", "tesseract_in_path": t_ok, "tesseract_cmd_configured": pytesseract.pytesseract.tesseract_cmd}
+    # =========================================================
+# ===================== LEGAI MODULE ======================
+# =========================================================
+# This section is APPEND-ONLY.
+# It does NOT modify existing OCR, ML, or extraction logic.
+# LEGAI runs ONLY when /chat-legai endpoint is called.
+# =========================================================
+
+_legai_loaded = False
+
+def load_legai_models():
+    """
+    Lazy-load all LEGAI legal models.
+    This will NOT run unless Chat with LEGAI is triggered.
+    """
+    global _legai_loaded
+    if _legai_loaded:
+        return
+
+    from transformers import pipeline
+
+    # 1️⃣ InLegalBERT – Indian legal NER (courts, statutes, parties)
+    print("Loading LEGAI: InLegalBERT...")
+    try:
+        app.state.inlegal_ner = pipeline(
+            "ner",
+            model="law-ai/InLegalBERT",
+            tokenizer="law-ai/InLegalBERT",
+            grouped_entities=True
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to load InLegalBERT: {e}")
+        app.state.inlegal_ner = None
+
+    # 2️⃣ IPC Section Identifier
+    print("Loading LEGAI: IPC Identifier...")
+    try:
+        app.state.ipc_identifier = pipeline(
+            "text-classification",
+            model="shreyas-dev/lawipc-ft"
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to load IPC Identifier (lawipc-ft): {e}")
+        # Explicitly set to None to trigger fallback mechanism
+        app.state.ipc_identifier = None
+
+    # 3️⃣ IPC → BNS (2024–25) Mapping Dataset
+    # File must exist locally
+    print("Loading LEGAI: IPC-BNS Map...")
+    try:
+        if os.path.exists("ipc_to_bns.json"):
+            with open("ipc_to_bns.json", "r", encoding="utf8") as f:
+                app.state.ipc_bns_map = json.load(f)
+        else:
+            print("⚠️ ipc_to_bns.json not found. Creating empty map.")
+            app.state.ipc_bns_map = {}
+    except Exception as e:
+        print(f"⚠️ Failed to load IPC-BNS map: {e}")
+        app.state.ipc_bns_map = {}
+
+    # 4️⃣ Cross-verification model (LLaMA-based Legal Assistant)
+    print("Loading LEGAI: Legal Assistant (LLaMA)...")
+    try:
+        app.state.llama_legal = pipeline(
+            "text-generation",
+            model="varma007ut/Indian_Legal_Assitant",
+            # Warning: This might be too heavy for CPU
+            max_new_tokens=256
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to load LLaMA Legal Assistant: {e}")
+        app.state.llama_legal = None
+
+    # 5️⃣ Final Answer Generator (FLAN-T5-Large)
+    print("Loading LEGAI: FLAN-T5-Large...")
+    try:
+        app.state.legai_generator = pipeline(
+            "text2text-generation",
+            model="google/flan-t5-large",
+            max_new_tokens=512
+        )
+        print("✅ LEGAI final answer model loaded: FLAN-T5-Large (Windows-safe)")
+    except Exception as e:
+        print(f"⚠️ Failed to load FLAN-T5 model: {e}")
+        app.state.legai_generator = None
+
+    _legai_loaded = True
+    print("✅ LEGAI models loading attempt complete.")
+
+
+def fallback_ipc_extraction(text: str) -> List[Dict[str, str]]:
+    """
+    Fallback mechanism if shreyas-dev/lawipc-ft crashes.
+    Uses regex to find common patterns like:
+    - IPC 420
+    - Section 420 IPC
+    - u/s 420 of IPC
+    """
+    import re
+    # Pattern 1: IPC 420, Section 302 IPC
+    ipc_pattern = re.compile(r'\b(?:IPC|Indian Penal Code)\s+(?:Section|Sec\.?|u/s)?\s*(\d+[A-Za-z]?)', re.IGNORECASE)
+    # Pattern 2: Section 302 of IPC
+    ipc_pattern_2 = re.compile(r'\b(?:Section|Sec\.?|u/s)\s+(\d+[A-Za-z]?)\s+(?:of\s+)?(?:IPC|Indian Penal Code)', re.IGNORECASE)
+    
+    found = []
+    # Search pattern 1
+    matches = ipc_pattern.findall(text)
+    for m in matches:
+        found.append({"label": f"IPC {m}", "score": 1.0})
+        
+    # Search pattern 2
+    matches2 = ipc_pattern_2.findall(text)
+    for m in matches2:
+        found.append({"label": f"IPC {m}", "score": 1.0})
+        
+    # De-duplicate
+    seen = set()
+    unique = []
+    for item in found:
+        lbl = item['label'].upper()
+        if lbl not in seen:
+            seen.add(lbl)
+            unique.append(item)
+            
+    return unique
+
+
+def fallback_legal_response(question: str, entities: List[Any], bns_sections: List[str]) -> str:
+    """
+    Lightweight fallback responder when Mistral/LLMs fail.
+    Constructs a structured response based on detected data.
+    """
+    response = "This response is generated using a lightweight legal reasoning fallback.\n\n"
+    response += "Based on the internal analysis of the document under Indian Law, here are the key findings:\n\n"
+    
+    # 1. Address BNS Sections
+    if bns_sections:
+        response += "**Relevant Legal Sections (Transitioned to BNS):**\n"
+        for section in bns_sections:
+            response += f"- {section}\n"
+        response += "\nThese sections correspond to the offenses or provisions identified in the text.\n"
+    else:
+        response += "**Legal Sections:** No specific IPC/BNS sections were explicitly identified in the text snippets analyzed.\n"
+        
+    # 2. Address Entities
+    if entities:
+        response += "\n**Identified Legal Entities:**\n"
+        # Simplify entities for display
+        seen_entities = set()
+        for ent in entities:
+            # Handle different dictionary structures from NER models vs Regex
+            val = ent.get('word', ent.get('value', ''))
+            tag = ent.get('entity_group', ent.get('label', 'Entity'))
+            if val and val not in seen_entities:
+                response += f"- {val} ({tag})\n"
+                seen_entities.add(val)
+    
+    return response
+
+
+def call_mistral_legai(doc_text: str, question: str, entities: List[Any], ipc_list: List[Dict], bns_list: List[str], verified_ctx: str) -> Optional[str]:
+    """
+    Calls Mistral AI API with strict system constraints.
+    """
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        return None
+    
+    try:
+        from mistralai import Mistral
+    except ImportError:
+        print("mistralai package not installed.")
+        return None
+
+    try:
+        client = Mistral(api_key=api_key)
+        
+        # Prepare inputs for prompt
+        # Entities string
+        ent_str = ", ".join([f"{e.get('word','')} ({e.get('entity_group','')})" for e in entities])
+        # IPC string
+        ipc_str = ", ".join([i.get('label','') for i in ipc_list])
+        # BNS string
+        bns_str = ", ".join(bns_list)
+
+        system_prompt = """SYSTEM ROLE
+
+You are LEGAI, an Indian Legal AI assistant embedded inside a document-analysis application.
+
+You DO NOT use your own pretrained legal knowledge, general internet knowledge, or proprietary databases.
+
+You ONLY reason from the data explicitly provided to you at runtime.
+
+STRICT DATA SOURCE RULES (MANDATORY)
+
+You are allowed to use ONLY the following four sources:
+
+InLegalBERT outputs
+- Indian legal Named Entity Recognition
+- Courts, statutes, parties, case references
+
+IPC → BNS Mapping Dataset (ipc_to_bns.json)
+- IPC sections
+- Corresponding Bharatiya Nyaya Sanhita (BNS) sections
+
+IPC / BNS section identifiers or regex-based extraction results
+- Whether ML-based or fallback regex
+
+Verified legal context explicitly passed in the prompt
+- Document text snippets
+- Cross-verification summaries
+- Extracted entities
+
+❌ You MUST NOT use:
+- General Mistral training data
+- Any external law knowledge
+- Any unstated statute, case, or section
+- Any assumptions
+
+If information is not present in the provided inputs, you must clearly say:
+“Based on the provided documents and datasets, this information is not available.”
+
+ANSWERING BEHAVIOR
+
+When responding:
+- Answer ONLY the user’s question
+- Base the answer strictly on provided legal context
+- Cite IPC / BNS sections only if they appear in the input
+- Do not hallucinate sections, cases, or interpretations
+- Avoid speculation or advisory language
+- Do not provide legal advice beyond factual explanation
+
+Tone:
+- Clear
+- Formal
+- Indian legal context
+- Neutral and factual
+
+ANTI-HALLUCINATION SAFETY
+
+Before finalizing any response, internally verify:
+“Did this information come from the given datasets or document text?”
+“Am I introducing unstated legal knowledge?”
+If YES → REMOVE IT
+
+OUTPUT FORMAT
+
+Respond in plain text or structured JSON only (as requested by the application).
+Do not include explanations about your reasoning process.
+
+MODEL OVERRIDE RULE
+
+You are powered by Mistral AI via API, but:
+- Mistral’s internal knowledge is STRICTLY DISABLED
+- You act only as a reasoning engine over supplied data, not a knowledge source.
+
+FAILURE MODE (IMPORTANT)
+
+If:
+- Legal context is insufficient
+- Sections cannot be verified
+- Dataset mapping is missing
+
+You must respond with a clear limitation notice, not a guess.
+
+FINAL COMPLIANCE STATEMENT
+
+You are compliant with:
+- Data-restricted reasoning
+- Non-hallucination
+- Indian legal accuracy
+- Application-controlled knowledge boundaries"""
+
+        user_content = f"""
+Input Data:
+1. Document Text:
+{doc_text[:15000]}
+
+2. Identified Legal Entities:
+{ent_str}
+
+3. IPC Sections:
+{ipc_str}
+
+4. Mapped BNS Sections:
+{bns_str}
+
+5. Verified Legal Context:
+{verified_ctx}
+
+6. User Question:
+{question}
+"""
+        
+        chat_response = client.chat.complete(
+            model="mistral-large-latest",
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_content,
+                },
+            ]
+        )
+        return chat_response.choices[0].message.content
+
+    except Exception as e:
+        print(f"Mistral API Error: {e}")
+        return None
+
+
+
+def legai_pipeline(document_text: str, user_question: str) -> Dict[str, Any]:
+    """
+    Main LEGAI pipeline.
+    Uses ALL 4 Hugging Face resources + Mistral.
+    Prioritizes models, falls back gracefully.
+    """
+    load_legai_models()
+
+    # Step 1: Indian Legal NER
+    legal_entities = []
+    if app.state.inlegal_ner:
+        try:
+            legal_entities = app.state.inlegal_ner(document_text[:4000])
+        except Exception as e:
+            print(f"NER Error: {e}")
+            # NER is optional, continue empty is fine
+
+    # Step 2: IPC Section Identification (Prioritized Fix)
+    ipc_sections = []
+    model_success = False
+    
+    # Attempt Model
+    if app.state.ipc_identifier:
+        try:
+            ipc_sections = app.state.ipc_identifier(document_text[:2000])
+            model_success = True
+        except Exception as e:
+            print(f"IPC ID Error (Model Exception): {e}")
+            model_success = False
+    
+    # Fallback to Regex if Model not loaded OR Model failed
+    if not model_success:
+        print("⚠️ IPC model not loaded or failed. Using Regex fallback.")
+        ipc_sections = fallback_ipc_extraction(document_text)
+
+    # Step 3: IPC → BNS Mapping
+    bns_sections = []
+    if isinstance(ipc_sections, list):
+        for sec in ipc_sections:
+            # Handle both model output 'label' and fallback output 'label'
+            label = sec.get("label")
+            if label:
+                # Normalize label if needed (simple check)
+                 if hasattr(app.state, 'ipc_bns_map') and label in app.state.ipc_bns_map:
+                    bns_sections.append(app.state.ipc_bns_map[label])
+
+    # Step 4: Cross-verification
+    verified_context = ""
+    if app.state.llama_legal:
+        verification_prompt = f"""
+        Document Text:
+        {document_text[:3000]}
+
+        Identified BNS Sections:
+        {bns_sections}
+
+        Verify the legal correctness and applicability under Indian law.
+        """
+        try:
+            out = app.state.llama_legal(verification_prompt)
+            if out and isinstance(out, list):
+                verified_context = out[0].get("generated_text", "")
+        except Exception as e:
+            print(f"Verification Error: {e}")
+            verified_context = "Verification skipped."
+
+    # Step 5: Final Answer (FLAN-T5-Large)
+    final_answer = ""
+    legai_success = False
+    
+    if app.state.legai_generator and not os.environ.get("MISTRAL_API_KEY"):
+        final_prompt = f"Instruct: You are LEGAI, an Indian Legal AI assistant. User Question: {user_question} Verified Context: {verified_context} Respond based on Indian law.\nOutput:"
+        
+        try:
+            out = app.state.legai_generator(final_prompt)
+            if out and isinstance(out, list):
+                final_answer = out[0].get("generated_text", "")
+                legai_success = True
+        except Exception as e:
+            print(f"FLAN-T5 Error: {e}")
+            legai_success = False
+    
+    # Critical Fallback if LLM failed
+    if not legai_success:
+         # Try Mistral if available
+         mistral_res = None
+         if os.environ.get("MISTRAL_API_KEY"):
+             print("Attempting Mistral AI fallback/primary...")
+             mistral_res = call_mistral_legai(document_text, user_question, legal_entities, ipc_sections, bns_sections, verified_context)
+         
+         if mistral_res:
+             final_answer = mistral_res
+             legai_success = True
+         else:
+             print("⚠️ LEGAI LLM/Mistral not available. Using fallback legal responder.")
+             final_answer = fallback_legal_response(user_question, legal_entities, bns_sections)
+
+    return {
+        "answer": final_answer,
+        "identified_bns_sections": bns_sections,
+        "legal_entities": legal_entities
+    }
+
+
+@app.post("/chat-legai")
+async def chat_legai(payload: Dict[str, Any]):
+    """
+    API endpoint triggered ONLY when user clicks
+    'Chat with LEGAI' button from UI.
+    """
+    document_text = payload.get("text")
+    question = payload.get("question")
+
+    if not document_text or not question:
+        raise HTTPException(
+            status_code=400,
+            detail="Both document text and question are required"
+        )
+
+    result = legai_pipeline(document_text, question)
+    return JSONResponse(result)
+
+@app.get("/chat-legai")
+def chat_legai_get():
+    """Helper to prevent 405 if user visits URL in browser."""
+    return JSONResponse({
+        "message": "This is a POST-only API endpoint for the LEGAI Chat Assistant. Please use the application UI to interact with it."
+    })
+
+@app.get("/upload")
+def upload_get():
+    """Helper to prevent 405 if user visits URL in browser."""
+    return JSONResponse({
+        "message": "This is a POST-only API endpoint for file uploads. Please use the application UI."
+    })

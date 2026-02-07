@@ -1,0 +1,2405 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Legal Doc Extractor</title>
+  <!-- Lottie Player -->
+  <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
+  <!-- Marked.js for Markdown Rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --background: #000000;
+      --foreground: #ffffff;
+      --primary: #f97316;
+      --primary-dark: #ea580c;
+      --primary-light: #fb923c;
+      --white-80: rgba(255, 255, 255, 0.8);
+      --white-70: rgba(255, 255, 255, 0.7);
+      --white-10: rgba(255, 255, 255, 0.1);
+      --white-20: rgba(255, 255, 255, 0.2);
+      --speed: 1s;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: var(--background);
+      color: var(--foreground);
+      overflow-x: hidden;
+    }
+
+    .container {
+      min-height: 100vh;
+      position: relative;
+      overflow: hidden;
+      background: var(--background);
+    }
+
+    .background-overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100vh;
+      z-index: 1;
+      pointer-events: none;
+    }
+
+    .background-overlay svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* Icon SVGs should maintain their specified dimensions */
+    button svg,
+    .ml-header svg,
+    .results-title svg,
+    nav svg,
+    a svg {
+      width: auto;
+      height: auto;
+      flex-shrink: 0;
+    }
+
+    /* Header Navigation */
+    header {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1rem;
+      max-width: 100%;
+    }
+
+    @media (min-width: 640px) {
+      header {
+        padding: 1rem 1.5rem;
+      }
+    }
+
+    @media (min-width: 1024px) {
+      header {
+        padding: 1rem 3rem;
+      }
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding-left: 0.75rem;
+    }
+
+    @media (min-width: 640px) {
+      .logo-container {
+        padding-left: 1.5rem;
+      }
+    }
+
+    @media (min-width: 1024px) {
+      .logo-container {
+        padding-left: 3rem;
+      }
+    }
+
+    .logo {
+      width: 2rem;
+      height: 2rem;
+    }
+
+    @media (min-width: 640px) {
+      .logo {
+        width: 2.5rem;
+        height: 2.5rem;
+      }
+    }
+
+    @media (min-width: 1024px) {
+      .logo {
+        width: 3rem;
+        height: 3rem;
+      }
+    }
+
+    nav {
+      display: none;
+      align-items: center;
+      gap: 1.5rem;
+    }
+
+    @media (min-width: 768px) {
+      nav {
+        display: flex;
+        gap: 2rem;
+      }
+    }
+
+    @media (min-width: 1024px) {
+      nav {
+        gap: 2rem;
+      }
+    }
+
+    nav a {
+      color: var(--white-80);
+      text-decoration: none;
+      font-size: 0.875rem;
+      transition: color 0.3s ease;
+    }
+
+    @media (min-width: 1024px) {
+      nav a {
+        font-size: 1rem;
+      }
+    }
+
+    nav a:hover {
+      color: var(--foreground);
+    }
+
+    .mobile-menu-btn {
+      display: block;
+      background: none;
+      border: none;
+      color: var(--foreground);
+      padding: 0.5rem;
+      cursor: pointer;
+      font-size: 0;
+    }
+
+    @media (min-width: 768px) {
+      .mobile-menu-btn {
+        display: none;
+      }
+    }
+
+    .mobile-menu-btn svg {
+      width: 1.5rem;
+      height: 1.5rem;
+    }
+
+    /* Mobile Menu */
+    .mobile-menu {
+      display: none;
+      position: absolute;
+      top: 4rem;
+      left: 0;
+      right: 0;
+      background: rgba(0, 0, 0, 0.95);
+      backdrop-filter: blur(0.5rem);
+      border-bottom: 1px solid var(--white-20);
+      z-index: 20;
+    }
+
+    .mobile-menu.active {
+      display: block;
+    }
+
+    @media (min-width: 768px) {
+      .mobile-menu {
+        display: none !important;
+      }
+    }
+
+    .mobile-menu nav {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      padding: 1.5rem;
+    }
+
+    .mobile-menu nav a {
+      color: var(--white-80);
+      text-decoration: none;
+      transition: color 0.3s ease;
+    }
+
+    .mobile-menu nav a:hover {
+      color: var(--foreground);
+    }
+
+    /* Shimmer Button */
+    .shimmer-button {
+      position: relative;
+      background: var(--primary);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 0.75rem;
+      padding: 0.75rem 1.5rem;
+      color: white;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      overflow: hidden;
+      transition: all 0.3s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      box-shadow: 0 10px 25px -5px rgba(249, 115, 22, 0.25);
+      text-transform: none;
+    }
+
+    @media (min-width: 768px) {
+      .shimmer-button {
+        display: flex;
+        padding: 0.5rem 1.5rem;
+      }
+    }
+
+    @media (min-width: 1024px) {
+      .shimmer-button {
+        padding: 0.5rem 1.5rem;
+        font-size: 1rem;
+      }
+    }
+
+    .shimmer-button:hover {
+      background: var(--primary-dark);
+      box-shadow: 0 20px 25px -5px rgba(249, 115, 22, 0.4);
+      transform: scale(1.02);
+    }
+
+    .shimmer-button:active {
+      transform: translateY(1px);
+    }
+
+    .shimmer-button::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: conic-gradient(from 270deg,
+          transparent 0,
+          white 90deg,
+          transparent 90deg);
+      animation: shimmer-spin 3s linear infinite;
+      opacity: 0;
+      z-index: -1;
+    }
+
+    .shimmer-button:hover::before {
+      opacity: 0.5;
+    }
+
+    @keyframes shimmer-spin {
+      from {
+        transform: rotate(0deg);
+      }
+
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .shimmer-button-mobile {
+      width: fit-content;
+      background: var(--primary);
+      padding: 0.625rem 1.5rem;
+      font-size: 0.875rem;
+    }
+
+    /* Main Content */
+    main {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: flex-start;
+      min-height: calc(100vh - 80px);
+      padding: 1rem;
+      max-width: 56rem;
+      padding-top: 1rem;
+      margin-left: 0;
+      padding-left: 1.5rem;
+    }
+
+    @media (min-width: 640px) {
+      main {
+        justify-content: center;
+        padding: 1.5rem;
+        padding-left: 3rem;
+        margin-top: -3rem;
+      }
+    }
+
+    @media (min-width: 1024px) {
+      main {
+        padding-left: 5rem;
+        margin-top: -6rem;
+      }
+    }
+
+    /* Trial Badge */
+    .trial-badge {
+      margin-bottom: 1rem;
+    }
+
+    @media (min-width: 640px) {
+      .trial-badge {
+        margin-bottom: 2rem;
+      }
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      background: var(--white-10);
+      backdrop-filter: blur(0.5rem);
+      border: 1px solid var(--white-20);
+      border-radius: 9999px;
+      padding: 0.75rem 1rem;
+      font-size: 0.75rem;
+      color: var(--foreground);
+    }
+
+    @media (min-width: 640px) {
+      .badge {
+        padding: 0.5rem 1rem;
+        font-size: 0.75rem;
+      }
+    }
+
+    /* Heading */
+    h1 {
+      color: var(--foreground);
+      font-size: 2.25rem;
+      font-weight: 700;
+      line-height: 1.2;
+      margin-bottom: 1rem;
+      text-balance: balance;
+    }
+
+    @media (min-width: 640px) {
+      h1 {
+        font-size: 1.875rem;
+      }
+    }
+
+    @media (min-width: 768px) {
+      h1 {
+        font-size: 3rem;
+      }
+    }
+
+    @media (min-width: 1024px) {
+      h1 {
+        font-size: 3.75rem;
+      }
+    }
+
+    @media (min-width: 1280px) {
+      h1 {
+        font-size: 5rem;
+      }
+    }
+
+    .line-shadow-text {
+      position: relative;
+      display: inline-flex;
+      font-style: italic;
+      font-weight: 300;
+      background: linear-gradient(45deg, transparent 45%, white 45%, white 55%, transparent 0);
+      background-size: 0.06em 0.06em;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: line-shadow 15s linear infinite;
+    }
+
+    @keyframes line-shadow {
+      0% {
+        background-position: 0 0;
+      }
+
+      100% {
+        background-position: 100% -100%;
+      }
+    }
+
+    /* Paragraph */
+    p {
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 0.875rem;
+      margin-bottom: 1.5rem;
+      max-width: 42rem;
+      text-wrap: balance;
+    }
+
+    @media (min-width: 640px) {
+      p {
+        font-size: 1rem;
+        margin-bottom: 2rem;
+      }
+    }
+
+    @media (min-width: 768px) {
+      p {
+        font-size: 0.875rem;
+      }
+    }
+
+    @media (min-width: 1024px) {
+      p {
+        font-size: 1.5rem;
+      }
+    }
+
+    /* Get Started Button */
+    .get-started-btn {
+      position: relative;
+      background: linear-gradient(to right, var(--primary), var(--primary-dark));
+      color: white;
+      padding: 0.625rem 1.5rem;
+      border: 1px solid rgba(251, 146, 60, 0.3);
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      backdrop-filter: blur(0.5rem);
+      box-shadow: 0 0 25px -5px rgba(249, 115, 22, 0.25);
+      transition: all 0.3s ease;
+    }
+
+    @media (min-width: 640px) {
+      .get-started-btn {
+        padding: 0.75rem 2rem;
+        font-size: 1rem;
+      }
+    }
+
+    @media (min-width: 768px) {
+      .get-started-btn {
+        padding: 0.75rem 2rem;
+        font-size: 0.875rem;
+      }
+    }
+
+    @media (min-width: 1024px) {
+      .get-started-btn {
+        font-size: 1.125rem;
+        padding: 0.75rem 2rem;
+      }
+    }
+
+    .get-started-btn:hover {
+      background: linear-gradient(to right, var(--primary-dark), #dc2626);
+      box-shadow: 0 0 25px -5px rgba(249, 115, 22, 0.4);
+      transform: scale(1.05) translateY(-2px);
+    }
+
+    .get-started-btn:active {
+      transform: scale(1.02);
+    }
+
+    .arrow-icon {
+      width: 1rem;
+      height: 1rem;
+      transition: transform 0.3s ease;
+    }
+
+    @media (min-width: 640px) {
+      .arrow-icon {
+        width: 1.25rem;
+        height: 1.25rem;
+      }
+    }
+
+    .get-started-btn:hover .arrow-icon {
+      transform: translateX(0.25rem) rotate(-12deg);
+    }
+
+    .get-started-btn::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 0.5rem;
+      background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.1), transparent);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .get-started-btn:hover::after {
+      opacity: 1;
+    }
+
+    /* Animations */
+    @keyframes flow {
+
+      0%,
+      100% {
+        opacity: 0.3;
+        stroke-dasharray: 0 100;
+        stroke-dashoffset: 0;
+      }
+
+      50% {
+        opacity: 0.8;
+        stroke-dasharray: 50 50;
+        stroke-dashoffset: -25;
+      }
+    }
+
+    @keyframes pulse1 {
+
+      0%,
+      100% {
+        opacity: 0.4;
+        transform: scale(0.8);
+      }
+
+      50% {
+        opacity: 1;
+        transform: scale(1.2);
+      }
+    }
+
+    @keyframes pulse2 {
+
+      0%,
+      100% {
+        opacity: 0.3;
+        transform: scale(0.9);
+      }
+
+      50% {
+        opacity: 1;
+        transform: scale(1.1);
+      }
+    }
+
+    @keyframes pulse3 {
+
+      0%,
+      100% {
+        opacity: 0.5;
+        transform: scale(0.7);
+      }
+
+      50% {
+        opacity: 1;
+        transform: scale(1.3);
+      }
+    }
+
+    .hidden-sm {
+      display: none;
+    }
+
+    @media (min-width: 640px) {
+      .hidden-sm {
+        display: inline;
+      }
+    }
+
+    /* Markdown Styles */
+    .markdown-body {
+      color: var(--white-80);
+      font-size: 0.875rem;
+      /* Reduced from 0.95rem */
+      line-height: 1.5;
+      margin-top: 8px;
+    }
+
+    .markdown-body p {
+      margin-bottom: 12px;
+    }
+
+    .markdown-body ul,
+    .markdown-body ol {
+      margin-bottom: 12px;
+      padding-left: 24px;
+    }
+
+    .markdown-body li {
+      margin-bottom: 4px;
+    }
+
+    .markdown-body strong {
+      color: var(--primary);
+      /* Use Primary Orange for strong emphasis */
+      font-weight: 700;
+    }
+
+    .markdown-body em {
+      color: var(--accent-cyan);
+      /* Cyan for italics */
+      font-style: italic;
+    }
+  </style>
+  <style>
+    /* ========================================= */
+    /* Extractor App Styles (Adapted for Bond)   */
+    /* ========================================= */
+    .hidden {
+      display: none !important;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 2rem;
+      padding: 2rem 1rem;
+      max-width: 1400px;
+      margin: 0 auto;
+      animation: fade-in-up 0.6s ease-out;
+      position: relative;
+      z-index: 20;
+    }
+
+    @media (min-width: 1024px) {
+      .app-shell {
+        grid-template-columns: 450px 1fr;
+        padding: 4rem 2rem;
+      }
+    }
+
+    /* Glass Cards */
+    .glass-card {
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--white-10);
+      border-radius: 1.5rem;
+      overflow: hidden;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    }
+
+    /* Upload Area */
+    .upload-card {
+      padding: 1.5rem;
+    }
+
+    .drop-zone {
+      border: 2px dashed var(--white-20);
+      border-radius: 1rem;
+      padding: 3rem 1.5rem;
+      text-align: center;
+      transition: all 0.3s ease;
+      background: rgba(255, 255, 255, 0.02);
+      position: relative;
+      overflow: hidden;
+      cursor: pointer;
+    }
+
+    .drop-zone:hover,
+    .drop-zone.drag {
+      border-color: var(--primary);
+      background: rgba(249, 115, 22, 0.05);
+    }
+
+    .drop-icon {
+      width: 4rem;
+      height: 4rem;
+      margin: 0 auto 1.5rem;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--primary);
+    }
+
+    .drop-title {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: var(--foreground);
+    }
+
+    .drop-subtitle {
+      color: var(--white-70);
+      font-size: 0.875rem;
+      margin-bottom: 1.5rem;
+    }
+
+    /* Preview */
+    .preview-area {
+      width: 100%;
+      height: 200px;
+      border-radius: 0.75rem;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--white-10);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      margin-bottom: 1.5rem;
+    }
+
+    .preview-area img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+
+    /* Controls */
+    .file-controls {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    /* Results Area */
+    .results-column {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .results-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--white-10);
+    }
+
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+      color: var(--white-70);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--white-20);
+    }
+
+    .status-dot.active {
+      background: var(--primary);
+      box-shadow: 0 0 10px var(--primary);
+    }
+
+    .status-dot.success {
+      background: #10b981;
+      box-shadow: 0 0 10px #10b981;
+    }
+
+    /* KPI Grid */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    @media (max-width: 768px) {
+      .kpi-grid {
+        grid-template-columns: 1fr;
+        gap: 0.75rem;
+      }
+    }
+
+    .kpi-card {
+      padding: 1.25rem 1.5rem;
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 0.75rem;
+      border: 1px solid var(--white-10);
+      position: relative;
+      overflow: hidden;
+      transition: all 0.3s ease;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 100px;
+    }
+
+    .kpi-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      background: linear-gradient(180deg, var(--primary), var(--primary-dark));
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .kpi-card:hover {
+      background: rgba(255, 255, 255, 0.05);
+      transform: translateY(-4px);
+    }
+
+    .kpi-card:hover::before {
+      opacity: 1;
+    }
+
+    .kpi-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--white-70);
+      margin-bottom: 0.625rem;
+      font-weight: 500;
+      line-height: 1.2;
+    }
+
+    .kpi-value {
+      font-family: inherit;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--primary);
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    /* ML Panel */
+    .ml-panel {
+      border-radius: 1rem;
+      border: 1px solid var(--white-10);
+      overflow: hidden;
+      margin-bottom: 1.5rem;
+    }
+
+    .ml-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1rem 1.25rem;
+      background: rgba(255, 255, 255, 0.02);
+      cursor: pointer;
+      transition: background 0.3s ease;
+    }
+
+    .ml-header:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .ml-header-left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .ml-badge {
+      padding: 0.375rem 0.75rem;
+      background: linear-gradient(135deg, rgba(249, 115, 22, 0.2), rgba(234, 88, 12, 0.2));
+      border: 1px solid rgba(249, 115, 22, 0.3);
+      border-radius: 100px;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--primary);
+    }
+
+    .ml-body {
+      padding: 0;
+      max-height: 0;
+      overflow: hidden;
+      transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .ml-body.open {
+      padding: 1.25rem;
+      max-height: 600px;
+    }
+
+    .ml-content {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+
+    @media (min-width: 768px) {
+      .ml-content {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    .ml-section {
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 0.5rem;
+      padding: 1rem;
+    }
+
+    .ml-section-title {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--white-70);
+      margin-bottom: 0.75rem;
+      font-weight: 600;
+    }
+
+    /* Results Title */
+    .results-title {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-weight: 600;
+      font-size: 1.125rem;
+      color: var(--foreground);
+    }
+
+    .results-title svg {
+      color: var(--primary);
+    }
+
+
+    /* Output Box */
+    .output-section {
+      margin-top: 1.5rem;
+    }
+
+    .output-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      color: var(--white-80);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .output-box {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--white-10);
+      border-radius: 0.75rem;
+      padding: 1rem;
+      font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+      font-size: 0.8125rem;
+      line-height: 1.6;
+      color: var(--white-80);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    /* Action Row */
+    .action-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-top: 1.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--white-10);
+    }
+
+    /* Chat Panel (Floating) */
+    .chat-panel {
+      position: fixed;
+      top: 0;
+      right: -450px;
+      width: 400px;
+      /* Base width */
+      max-width: 100%;
+      height: 100vh;
+      background: rgba(10, 10, 10, 0.95);
+      backdrop-filter: blur(20px);
+      border-left: 1px solid var(--white-10);
+      z-index: 1000;
+      transition: right 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      flex-direction: column;
+      box-shadow: -20px 0 50px rgba(0, 0, 0, 0.5);
+    }
+
+    .chat-panel.open {
+      right: 0;
+    }
+
+    .chat-header {
+      padding: 1.5rem;
+      border-bottom: 1px solid var(--white-10);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .chat-title {
+      font-weight: 700;
+      font-size: 1.125rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: var(--primary);
+    }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .chat-input-area {
+      padding: 1.5rem;
+      border-top: 1px solid var(--white-10);
+      background: rgba(0, 0, 0, 0.2);
+      display: flex;
+      gap: 0.75rem;
+    }
+
+    .chat-input {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--white-10);
+      padding: 0.75rem 1rem;
+      border-radius: 0.75rem;
+      color: white;
+      font-family: inherit;
+      outline: none;
+      resize: none;
+    }
+
+    .chat-input:focus {
+      border-color: var(--primary);
+    }
+
+    .msg {
+      max-width: 85%;
+      padding: 0.75rem 1rem;
+      border-radius: 1rem;
+      font-size: 0.875rem;
+      line-height: 1.5;
+    }
+
+    .msg-user {
+      align-self: flex-end;
+      background: var(--primary);
+      color: white;
+      border-bottom-right-radius: 0.25rem;
+    }
+
+    .msg-ai {
+      align-self: flex-start;
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--foreground);
+      border-bottom-left-radius: 0.25rem;
+    }
+
+    /* Buttons (Override/Extend) */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.625rem 1.25rem;
+      border-radius: 0.5rem;
+      font-size: 0.875rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: 1px solid transparent;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--primary-dark);
+      transform: translateY(-2px);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: var(--white-10);
+      color: var(--white-80);
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.1);
+      color: white;
+    }
+
+    .btn-icon {
+      padding: 0.625rem;
+    }
+
+    @keyframes fade-in-up {
+      from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media(max-width: 640px) {
+      .chat-panel {
+        width: 100%;
+        right: -100%;
+        border-left: none;
+      }
+    }
+
+    /* ========================================= */
+    /* Content Sections (Features, How It Works) */
+    /* ========================================= */
+    .content-section {
+      padding: 5rem 1.5rem;
+      max-width: 1200px;
+      margin: 0 auto;
+      position: relative;
+      z-index: 10;
+    }
+
+    .section-header {
+      text-align: center;
+      margin-bottom: 3.5rem;
+    }
+
+    .section-title {
+      font-size: 2.25rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      color: var(--foreground);
+    }
+
+    @media (min-width: 768px) {
+      .section-title {
+        font-size: 2.75rem;
+      }
+    }
+
+    .section-subtitle {
+      font-size: 1rem;
+      color: var(--white-70);
+      max-width: 600px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+
+    /* Feature Cards Grid */
+    .features-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.5rem;
+    }
+
+    @media (min-width: 640px) {
+      .features-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (min-width: 1024px) {
+      .features-grid {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    .feature-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--white-10);
+      border-radius: 1rem;
+      padding: 2rem;
+      transition: transform 0.3s ease, border-color 0.3s ease, background 0.3s ease;
+    }
+
+    .feature-card:hover {
+      transform: translateY(-8px);
+      border-color: var(--primary);
+      background: rgba(249, 115, 22, 0.05);
+    }
+
+    .feature-icon {
+      width: 3.5rem;
+      height: 3.5rem;
+      margin-bottom: 1.25rem;
+      background: linear-gradient(135deg, rgba(249, 115, 22, 0.15) 0%, rgba(234, 88, 12, 0.1) 100%);
+      border-radius: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--primary);
+      border: 1px solid rgba(249, 115, 22, 0.2);
+    }
+
+    .feature-title {
+      font-size: 1.125rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: var(--foreground);
+    }
+
+    .feature-desc {
+      font-size: 0.875rem;
+      color: var(--white-70);
+      line-height: 1.6;
+    }
+
+    /* How It Works Steps */
+    .steps-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 2rem;
+    }
+
+    @media (min-width: 768px) {
+      .steps-grid {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    .step-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--white-10);
+      border-radius: 1rem;
+      padding: 2rem;
+      text-align: center;
+      transition: transform 0.3s ease, border-color 0.3s ease;
+      position: relative;
+    }
+
+    .step-card:hover {
+      transform: translateY(-5px);
+      border-color: var(--primary);
+    }
+
+    .step-number {
+      width: 3rem;
+      height: 3rem;
+      margin: 0 auto 1.25rem;
+      background: var(--primary);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: white;
+    }
+
+    .step-title {
+      font-size: 1.125rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: var(--foreground);
+    }
+
+    .step-desc {
+      font-size: 0.875rem;
+      color: var(--white-70);
+      line-height: 1.6;
+    }
+
+    /* Comparison Table */
+    .comparison-wrapper {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--white-10);
+      border-radius: 1rem;
+      overflow: hidden;
+      backdrop-filter: blur(10px);
+    }
+
+    .comparison-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .comparison-table th,
+    .comparison-table td {
+      padding: 1.25rem 1.5rem;
+      text-align: left;
+      border-bottom: 1px solid var(--white-10);
+    }
+
+    .comparison-table th {
+      background: rgba(255, 255, 255, 0.05);
+      font-weight: 600;
+      color: var(--white-80);
+      font-size: 0.875rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .comparison-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .comparison-table tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .check-icon {
+      color: #10b981;
+    }
+
+    .cross-icon {
+      color: #ef4444;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="background-overlay">
+      <svg viewBox="0 0 1200 800" fill="none" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice">
+        <defs>
+          <radialGradient id="neonPulse1" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(255,255,255,1)" />
+            <stop offset="30%" stop-color="rgba(251,146,60,1)" />
+            <stop offset="70%" stop-color="rgba(249,115,22,0.8)" />
+            <stop offset="100%" stop-color="rgba(249,115,22,0)" />
+          </radialGradient>
+          <radialGradient id="neonPulse2" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(255,255,255,0.9)" />
+            <stop offset="25%" stop-color="rgba(251,146,60,0.9)" />
+            <stop offset="60%" stop-color="rgba(234,88,12,0.7)" />
+            <stop offset="100%" stop-color="rgba(234,88,12,0)" />
+          </radialGradient>
+          <radialGradient id="neonPulse3" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(255,255,255,1)" />
+            <stop offset="35%" stop-color="rgba(251,146,60,1)" />
+            <stop offset="75%" stop-color="rgba(234,88,12,0.6)" />
+            <stop offset="100%" stop-color="rgba(234,88,12,0)" />
+          </radialGradient>
+          <radialGradient id="heroTextBg" cx="30%" cy="50%" r="70%">
+            <stop offset="0%" stop-color="rgba(249,115,22,0.15)" />
+            <stop offset="40%" stop-color="rgba(251,146,60,0.08)" />
+            <stop offset="80%" stop-color="rgba(234,88,12,0.05)" />
+            <stop offset="100%" stop-color="rgba(0,0,0,0)" />
+          </radialGradient>
+          <filter id="heroTextBlur" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="12" result="blur" />
+            <feTurbulence baseFrequency="0.7" numOctaves="4" result="noise" />
+            <feColorMatrix in="noise" type="saturate" values="0" result="monoNoise" />
+            <feComponentTransfer in="monoNoise" result="alphaAdjustedNoise">
+              <feFuncA type="discrete" tableValues="0.03 0.06 0.09 0.12" />
+            </feComponentTransfer>
+            <feComposite in="blur" in2="alphaAdjustedNoise" operator="multiply" result="noisyBlur" />
+            <feMerge>
+              <feMergeNode in="noisyBlur" />
+            </feMerge>
+          </filter>
+          <linearGradient id="threadFade1" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="rgba(0,0,0,1)" />
+            <stop offset="15%" stop-color="rgba(249,115,22,0.8)" />
+            <stop offset="85%" stop-color="rgba(249,115,22,0.8)" />
+            <stop offset="100%" stop-color="rgba(0,0,0,1)" />
+          </linearGradient>
+          <linearGradient id="threadFade2" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="rgba(0,0,0,1)" />
+            <stop offset="12%" stop-color="rgba(251,146,60,0.7)" />
+            <stop offset="88%" stop-color="rgba(251,146,60,0.7)" />
+            <stop offset="100%" stop-color="rgba(0,0,0,1)" />
+          </linearGradient>
+          <linearGradient id="threadFade3" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="rgba(0,0,0,1)" />
+            <stop offset="18%" stop-color="rgba(234,88,12,0.8)" />
+            <stop offset="82%" stop-color="rgba(234,88,12,0.8)" />
+            <stop offset="100%" stop-color="rgba(0,0,0,1)" />
+          </linearGradient>
+          <filter id="neonGlow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="2" result="coloredBlur" />
+            <feMerge>
+              <feMergeNode in="coloredBlur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+
+        <g>
+          <!-- Hero text background -->
+          <ellipse cx="300" cy="350" rx="400" ry="200" fill="url(#heroTextBg)" filter="url(#heroTextBlur)"
+            opacity="0.6" />
+          <ellipse cx="350" cy="320" rx="500" ry="250" fill="url(#heroTextBg)" filter="url(#heroTextBlur)"
+            opacity="0.4" />
+          <ellipse cx="400" cy="300" rx="600" ry="300" fill="url(#heroTextBg)" filter="url(#heroTextBlur)"
+            opacity="0.2" />
+
+          <!-- Thread 1 -->
+          <path id="thread1" d="M50 720 Q200 590 350 540 Q500 490 650 520 Q800 550 950 460 Q1100 370 1200 340"
+            stroke="url(#threadFade1)" stroke-width="0.8" fill="none" opacity="0.8" />
+          <circle r="2" fill="url(#neonPulse1)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4s" repeatCount="indefinite">
+              <mpath href="#thread1" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 2 -->
+          <path id="thread2" d="M80 730 Q250 620 400 570 Q550 520 700 550 Q850 580 1000 490 Q1150 400 1300 370"
+            stroke="url(#threadFade2)" stroke-width="1.5" fill="none" opacity="0.7" />
+          <circle r="3" fill="url(#neonPulse2)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="5s" repeatCount="indefinite">
+              <mpath href="#thread2" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 3 -->
+          <path id="thread3" d="M20 710 Q180 580 320 530 Q460 480 600 510 Q740 540 880 450 Q1020 360 1200 330"
+            stroke="url(#threadFade3)" stroke-width="1.2" fill="none" opacity="0.8" />
+          <circle r="2.5" fill="url(#neonPulse1)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4.5s" repeatCount="indefinite">
+              <mpath href="#thread3" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 4 -->
+          <path id="thread4" d="M120 740 Q280 640 450 590 Q620 540 770 570 Q920 600 1070 510 Q1220 420 1350 390"
+            stroke="url(#threadFade1)" stroke-width="0.6" fill="none" opacity="0.6" />
+          <circle r="1.5" fill="url(#neonPulse3)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="5.5s" repeatCount="indefinite">
+              <mpath href="#thread4" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 5 -->
+          <path id="thread5" d="M60 725 Q220 600 380 550 Q540 500 680 530 Q820 560 960 470 Q1100 380 1280 350"
+            stroke="url(#threadFade2)" stroke-width="1.0" fill="none" opacity="0.7" />
+          <circle r="2.2" fill="url(#neonPulse2)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4.2s" repeatCount="indefinite">
+              <mpath href="#thread5" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 6 -->
+          <path id="thread6" d="M150 735 Q300 660 480 610 Q660 560 800 590 Q940 620 1080 530 Q1220 440 1400 410"
+            stroke="url(#threadFade3)" stroke-width="1.3" fill="none" opacity="0.6" />
+          <circle r="2.8" fill="url(#neonPulse1)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="5.2s" repeatCount="indefinite">
+              <mpath href="#thread6" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 7 -->
+          <path id="thread7" d="M40 715 Q190 585 340 535 Q490 485 630 515 Q770 545 910 455 Q1050 365 1250 335"
+            stroke="url(#threadFade1)" stroke-width="0.9" fill="none" opacity="0.8" />
+          <circle r="2" fill="url(#neonPulse3)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4.8s" repeatCount="indefinite">
+              <mpath href="#thread7" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 8 -->
+          <path id="thread8" d="M100 728 Q260 630 420 580 Q580 530 720 560 Q860 590 1000 500 Q1140 410 1320 380"
+            stroke="url(#threadFade2)" stroke-width="1.4" fill="none" opacity="0.7" />
+          <circle r="3" fill="url(#neonPulse2)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="5.8s" repeatCount="indefinite">
+              <mpath href="#thread8" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 9 -->
+          <path id="thread9" d="M30 722 Q170 595 310 545 Q450 495 590 525 Q730 555 870 465 Q1010 375 1180 345"
+            stroke="url(#threadFade3)" stroke-width="0.5" fill="none" opacity="0.6" />
+          <circle r="1.2" fill="url(#neonPulse1)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="6s" repeatCount="indefinite">
+              <mpath href="#thread9" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 10 -->
+          <path id="thread10" d="M90 732 Q240 625 390 575 Q540 525 680 555 Q820 585 960 495 Q1100 405 1300 375"
+            stroke="url(#threadFade1)" stroke-width="1.1" fill="none" opacity="0.8" />
+          <circle r="2.5" fill="url(#neonPulse3)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4.3s" repeatCount="indefinite">
+              <mpath href="#thread10" />
+            </animateMotion>
+          </circle>
+
+          <!-- Additional threads (11-36 abbreviated for brevity but included in pattern) -->
+          <!-- Thread 11 -->
+          <path id="thread11" d="M70 727 Q210 605 360 555 Q510 505 650 535 Q790 565 930 475 Q1070 385 1260 355"
+            stroke="url(#threadFade2)" stroke-width="0.4" fill="none" opacity="0.5" />
+          <circle r="1" fill="url(#neonPulse2)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="5.7s" repeatCount="indefinite">
+              <mpath href="#thread11" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 12 -->
+          <path id="thread12" d="M110 738 Q270 645 430 595 Q590 545 730 575 Q870 605 1010 515 Q1150 425 1380 395"
+            stroke="url(#threadFade3)" stroke-width="1.5" fill="none" opacity="0.7" />
+          <circle r="3.2" fill="url(#neonPulse1)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4.7s" repeatCount="indefinite">
+              <mpath href="#thread12" />
+            </animateMotion>
+          </circle>
+
+          <!-- Threads 13-36 following the same pattern (omitted for brevity) -->
+          <!-- Thread 13 -->
+          <path id="thread13" d="M45 718 Q185 588 325 538 Q465 488 605 518 Q745 548 885 458 Q1025 368 1220 338"
+            stroke="url(#threadFade1)" stroke-width="0.7" fill="none" opacity="0.6" />
+          <circle r="1.8" fill="url(#neonPulse3)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="5.3s" repeatCount="indefinite">
+              <mpath href="#thread13" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 14 -->
+          <path id="thread14" d="M130 721 Q290 630 460 580 Q630 530 770 560 Q910 590 1050 500 Q1190 410 1350 380"
+            stroke="url(#threadFade2)" stroke-width="1.0" fill="none" opacity="0.8" />
+          <circle r="2.3" fill="url(#neonPulse2)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4.9s" repeatCount="indefinite">
+              <mpath href="#thread14" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 15 -->
+          <path id="thread15" d="M25 713 Q165 583 305 533 Q445 483 585 513 Q725 543 865 453 Q1005 363 1200 333"
+            stroke="url(#threadFade3)" stroke-width="0.3" fill="none" opacity="0.4" />
+          <circle r="0.8" fill="url(#neonPulse1)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="6.2s" repeatCount="indefinite">
+              <mpath href="#thread15" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 16 -->
+          <path id="thread16" d="M85 719 Q235 605 385 555 Q535 505 675 535 Q815 565 955 475 Q1095 385 1320 355"
+            stroke="url(#threadFade1)" stroke-width="1.5" fill="none" opacity="0.9" />
+          <circle r="3.2" fill="url(#neonPulse2)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4.1s" repeatCount="indefinite">
+              <mpath href="#thread16" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 17 -->
+          <path id="thread17" d="M50 720 Q180 660 320 620 Q460 580 600 600 Q740 620 880 560 Q1020 500 1200 340"
+            stroke="url(#threadFade2)" stroke-width="0.6" fill="none" opacity="0.5" />
+          <circle r="1.5" fill="url(#neonPulse1)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="5.1s" repeatCount="indefinite">
+              <mpath href="#thread17" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 18 -->
+          <path id="thread18" d="M50 720 Q200 680 350 640 Q500 600 650 620 Q800 640 950 580 Q1100 520 1200 340"
+            stroke="url(#threadFade3)" stroke-width="1.2" fill="none" opacity="0.7" />
+          <circle r="2.8" fill="url(#neonPulse2)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4.6s" repeatCount="indefinite">
+              <mpath href="#thread18" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 19 -->
+          <path id="thread19" d="M50 720 Q160 670 280 630 Q400 590 540 610 Q680 630 820 570 Q960 510 1200 340"
+            stroke="url(#threadFade1)" stroke-width="0.8" fill="none" opacity="0.6" />
+          <circle r="2" fill="url(#neonPulse3)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="5.4s" repeatCount="indefinite">
+              <mpath href="#thread19" />
+            </animateMotion>
+          </circle>
+
+          <!-- Thread 20 -->
+          <path id="thread20" d="M50 720 Q220 690 380 650 Q540 610 680 630 Q820 650 960 590 Q1100 530 1200 340"
+            stroke="url(#threadFade2)" stroke-width="1.4" fill="none" opacity="0.8" />
+          <circle r="3" fill="url(#neonPulse1)" opacity="1" filter="url(#neonGlow)">
+            <animateMotion dur="4.4s" repeatCount="indefinite">
+              <mpath href="#thread20" />
+            </animateMotion>
+          </circle>
+
+          <!-- Additional threads 21-36 continue with similar patterns -->
+        </g>
+      </svg>
+    </div>
+
+    <!-- Header Navigation -->
+    <header>
+
+
+      <nav>
+        <a href="#features">Features</a>
+        <a href="#pricing">Existing System</a>
+        <a href="#about">Sample Images</a>
+        <a href="#contact">Contact</a>
+      </nav>
+
+      <!-- Mobile menu button -->
+      <button class="mobile-menu-btn" id="mobileMenuBtn">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="3" y1="6" x2="21" y2="6"></line>
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+      </button>
+
+      <button class="shimmer-button" id="deployBtnDesktop">Get Started</button>
+    </header>
+
+    <!-- Mobile Menu -->
+    <div class="mobile-menu" id="mobileMenu">
+      <nav>
+        <a href="#features">Features</a>
+        <a href="#pricing">Pricing</a>
+        <a href="#about">About us</a>
+        <a href="#contact">Contact</a>
+        <button class="shimmer-button shimmer-button-mobile" id="deployBtnMobile">Get Started</button>
+      </nav>
+    </div>
+
+    <!-- Main Content -->
+    <main>
+      <!-- Trial Badge 
+      <div class="trial-badge">
+        <div class="badge">
+          <span>Completely implemented using AI & ML Libraries</span>
+        </div>
+      </div>-->
+
+      <h1>
+        Intelligent Legal Document Analyzer
+        <br />
+        <span class="line-shadow-text">Using AI & ML Libraries</span>
+      </h1>
+
+      <!-- <p>
+        Upload agreements (images/PDF). Experience lightning-fast OCR, intelligent field extraction, and
+        ML-powered insights — all wrapped in a delightful interface.
+      </p> -->
+
+      <button class="get-started-btn" id="getStartedBtn">
+        Try the Extractor
+        <svg class="arrow-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6">
+          </path>
+        </svg>
+      </button>
+    </main>
+  </div>
+  <!-- End Hero Wrapper -->
+
+  <!-- Features Section -->
+  <section class="content-section" id="features">
+    <div class="section-header">
+      <h2 class="section-title">Powerful Features</h2>
+      <p class="section-subtitle">Built with cutting-edge AI and ML libraries to streamline your legal document
+        analysis workflow.</p>
+    </div>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="16" y1="13" x2="8" y2="13" />
+            <line x1="16" y1="17" x2="8" y2="17" />
+            <polyline points="10 9 9 9 8 9" />
+          </svg>
+        </div>
+        <div class="feature-title">OCR Extraction</div>
+        <p class="feature-desc">Lightning-fast optical character recognition for images and scanned PDFs with
+          high accuracy.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.35-4.35" />
+          </svg>
+        </div>
+        <div class="feature-title">Smart Field Detection</div>
+        <p class="feature-desc">Automatically identifies and extracts key fields like dates, parties, amounts,
+          and clauses.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+        </div>
+        <div class="feature-title">ML-Powered Insights</div>
+        <p class="feature-desc">Get intelligent insights using machine learning models trained on legal
+          documents.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path
+              d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+          </svg>
+        </div>
+        <div class="feature-title">LEGAI Chat</div>
+        <p class="feature-desc">Ask questions about your document and get AI-powered answers based on Indian Law
+          &amp; BNS.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
+        </div>
+        <div class="feature-title">Secure Processing</div>
+        <p class="feature-desc">Your documents are processed securely with enterprise-grade encryption and
+          privacy.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+        </div>
+        <div class="feature-title">Export Options</div>
+        <p class="feature-desc">Download extracted data as JSON, PDF, or copy to clipboard with one click.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- How It Works Section -->
+  <section class="content-section" id="how-it-works">
+    <div class="section-header">
+      <h2 class="section-title">How It Works</h2>
+      <p class="section-subtitle">Three simple steps to extract and analyze your legal documents.</p>
+    </div>
+    <div class="steps-grid">
+      <div class="step-card">
+        <div class="step-number">1</div>
+        <div class="step-title">Upload Document</div>
+        <p class="step-desc">Drag and drop your image or PDF file, or click to browse and select.</p>
+      </div>
+      <div class="step-card">
+        <div class="step-number">2</div>
+        <div class="step-title">Analyze</div>
+        <p class="step-desc">Our AI processes the document, extracts text, and identifies key fields.</p>
+      </div>
+      <div class="step-card">
+        <div class="step-number">3</div>
+        <div class="step-title">Get Results</div>
+        <p class="step-desc">View extracted data, chat with LEGAI for insights, and export your results.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Comparison Section -->
+  <section class="content-section" id="comparison">
+    <div class="section-header">
+      <h2 class="section-title">Why Choose Us?</h2>
+      <p class="section-subtitle">See how our solution compares to traditional methods.</p>
+    </div>
+    <div class="comparison-wrapper">
+      <table class="comparison-table">
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>Our Solution</th>
+            <th>Manual Review</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Processing Time</td>
+            <td><span class="check-icon">✓</span> Seconds</td>
+            <td><span class="cross-icon">✗</span> Hours</td>
+          </tr>
+          <tr>
+            <td>Accuracy</td>
+            <td><span class="check-icon">✓</span> 95%+ ML Precision</td>
+            <td><span class="cross-icon">✗</span> Human Error Prone</td>
+          </tr>
+          <tr>
+            <td>Legal Insights</td>
+            <td><span class="check-icon">✓</span> AI-Powered (BNS/IPC)</td>
+            <td><span class="cross-icon">✗</span> Requires Expert</td>
+          </tr>
+          <tr>
+            <td>Cost</td>
+            <td><span class="check-icon">✓</span> Affordable</td>
+            <td><span class="cross-icon">✗</span> Expensive</td>
+          </tr>
+          <tr>
+            <td>Scalability</td>
+            <td><span class="check-icon">✓</span> Unlimited</td>
+            <td><span class="cross-icon">✗</span> Limited</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- App Shell (Hidden by default, toggled via Get Started) -->
+  <section id="app" class="app-shell hidden">
+    <!-- Upload Card -->
+    <div class="upload-card glass-card">
+      <div id="drop" class="drop-zone" tabindex="0">
+        <div class="drop-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="17 8 12 3 7 8" />
+            <line x1="12" y1="3" x2="12" y2="15" />
+          </svg>
+        </div>
+        <div class="drop-title">Upload your Document</div>
+        <div class="drop-subtitle">Drag & drop or click to browse</div>
+
+        <div class="preview-area" id="thumb">
+          <div style="color: var(--white-70); display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+            <span>No file selected</span>
+          </div>
+        </div>
+
+        <input id="fileInput" type="file" accept="image/*,.pdf" style="display:none" />
+
+        <div class="file-controls">
+          <button class="btn btn-primary" id="chooseBtn">Choose File</button>
+          <button class="btn btn-primary" id="analyzeBtn" disabled>Analyze</button>
+          <button class="btn btn-secondary" id="clearBtn" style="display:none">Clear</button>
+        </div>
+
+        <!-- Feature Toggle -->
+        <div style="margin-top: 1.5rem; display: flex; align-items: center; justify-content: center; gap: 0.75rem;">
+          <input type="checkbox" id="demoToggle" style="accent-color: var(--primary);">
+          <label for="demoToggle" style="color: var(--white-70); font-size: 0.875rem;">Enable Demo Mode
+            (Simulate)</label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Results Column -->
+    <div class="results-column">
+      <div class="glass-card" style="padding: 1.5rem;">
+        <div class="results-header">
+          <div style="display:flex; align-items:center; gap:16px;">
+            <div class="results-title">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+                <polyline points="10 9 9 9 8 9" />
+              </svg>
+              Extraction Results
+            </div>
+            <button class="btn btn-primary btn-small" id="chatLegaiBtn" style="padding: 6px 12px; font-size: 0.75rem;"
+              disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
+                <path
+                  d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+              </svg>
+              Chat with LEGAI
+            </button>
+          </div>
+          <div class="status-indicator">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Ready</span>
+          </div>
+        </div>
+
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-label">Purpose</div>
+            <div class="kpi-value" id="kPurpose">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Duration</div>
+            <div class="kpi-value" id="kDuration">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Parties</div>
+            <div class="kpi-value" id="kParties">—</div>
+          </div>
+        </div>
+
+        <!-- ML Insights Panel -->
+        <div class="ml-panel">
+          <div class="ml-header" id="toggleML">
+            <div class="ml-header-left">
+              <span class="ml-badge">AI</span>
+              <span style="font-weight: 600; color: var(--foreground);">ML Insights</span>
+              <span style="font-size: 0.875rem; color: var(--white-70);">Summary & Entities</span>
+            </div>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" id="mlChevron"
+              style="transition: transform 0.3s ease; color: var(--white-70);">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </div>
+          <div class="ml-body" id="mlBody">
+            <div class="ml-content">
+              <div class="ml-section">
+                <div class="ml-section-title">AI Summary</div>
+                <div class="output-box" id="mlSummary">No AI summary available.</div>
+              </div>
+              <div class="ml-section">
+                <div class="ml-section-title">Entities & Scores</div>
+                <div class="output-box" id="mlEntities">No entities detected.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Output Section -->
+        <div class="output-section" style="margin-top: 0;">
+          <div class="output-title">Extracted Text</div>
+          <div class="output-box" id="textOut">No extracted text.</div>
+        </div>
+
+        <div class="output-section">
+          <div class="output-title">JSON Data</div>
+          <pre class="output-box" id="jsonOut">{ }</pre>
+        </div>
+
+
+        <div class="action-row">
+          <div style="display: flex; gap: 0.75rem;">
+            <button class="btn btn-secondary" id="copyJSON" disabled>Copy JSON</button>
+            <button class="btn btn-secondary" id="downloadJSON" disabled>Download</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- LEGAI Chat Panel -->
+  <div class="chat-panel" id="chatPanel">
+    <div class="chat-header">
+      <div class="chat-title">
+        LEGAI Assistant
+      </div>
+      <select id="chatLang"
+        style="margin-left:auto; margin-right:8px; background:#1e1e1e; color:var(--white-80); border:1px solid rgba(255,255,255,0.1); border-radius:4px; padding:2px 6px; font-size:12px;">
+        <option value="en" selected>English</option>
+        <option value="te">Telugu</option>
+        <option value="hi">Hindi</option>
+      </select>
+      <button class="mobile-menu-btn" id="closeChatBtn" style="display: block;">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+    <div class="chat-messages" id="chatMessages">
+      <div class="msg msg-ai">
+        Hello! I'm LEGAI. Once you analyze a document, I can answer your legal questions based on its
+        content using Indian Law & BNS.
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <textarea class="chat-input" id="chatInput" placeholder="Ask a legal question..." rows="1"></textarea>
+      <button class="btn btn-primary btn-icon" id="chatSendBtn" disabled>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13" />
+          <polygon points="22 2 15 22 11 13 2 9 22 2" />
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <script>
+    // ============================================
+    // Existing UI Logic (Mobile Menu, etc)
+    // ============================================
+    const mobileMenuBtn = document.getElementById('mobileMenuBtn');
+    const mobileMenu = document.getElementById('mobileMenu');
+
+    if (mobileMenuBtn) {
+      mobileMenuBtn.addEventListener('click', () => {
+        mobileMenu.classList.toggle('active');
+      });
+    }
+
+    // Close mobile menu when clicking on a link
+    const navLinks = mobileMenu ? mobileMenu.querySelectorAll('a') : [];
+    navLinks.forEach(link => {
+      link.addEventListener('click', () => {
+        mobileMenu.classList.remove('active');
+      });
+    });
+
+    // ============================================
+    // App Logic (Ported from index.html)
+    // ============================================
+
+    // Elements
+    const getStartedBtn = document.getElementById('getStartedBtn');
+    const deployBtnDesktop = document.getElementById('deployBtnDesktop');
+    const deployBtnMobile = document.getElementById('deployBtnMobile');
+    const app = document.getElementById('app');
+    const main = document.querySelector('main');
+
+    // Feature Elements
+    const drop = document.getElementById('drop');
+    const fileInput = document.getElementById('fileInput');
+    const chooseBtn = document.getElementById('chooseBtn');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const thumb = document.getElementById('thumb');
+    const demoToggle = document.getElementById('demoToggle');
+
+    // Output Elements
+    const statusText = document.getElementById('statusText');
+    const statusDot = document.getElementById('statusDot');
+    const textOut = document.getElementById('textOut');
+    const jsonOut = document.getElementById('jsonOut');
+    const kPurpose = document.getElementById('kPurpose');
+    const kDuration = document.getElementById('kDuration');
+    const kParties = document.getElementById('kParties');
+    const copyJSON = document.getElementById('copyJSON');
+    const downloadJSON = document.getElementById('downloadJSON');
+
+    // ML Panel Elements
+    const toggleML = document.getElementById('toggleML');
+    const mlBody = document.getElementById('mlBody');
+    const mlChevron = document.getElementById('mlChevron');
+    const mlSummary = document.getElementById('mlSummary');
+    const mlEntities = document.getElementById('mlEntities');
+
+    // ML Panel Toggle
+    if (toggleML) {
+      toggleML.addEventListener('click', () => {
+        mlBody.classList.toggle('open');
+        mlChevron.style.transform = mlBody.classList.contains('open') ? 'rotate(180deg)' : 'rotate(0deg)';
+      });
+    }
+
+    // Chat Elements
+    const chatLegaiBtn = document.getElementById('chatLegaiBtn');
+    const chatPanel = document.getElementById('chatPanel');
+    const closeChatBtn = document.getElementById('closeChatBtn');
+    const chatInput = document.getElementById('chatInput');
+    const chatSendBtn = document.getElementById('chatSendBtn');
+    const chatMessages = document.getElementById('chatMessages');
+
+    // State
+    let selectedFile = null;
+    let lastResult = null;
+    let demoMode = false;
+
+    // Navigation / Visibility
+    function showApp() {
+      if (app) {
+        app.classList.remove('hidden');
+        // Scroll to app
+        app.scrollIntoView({ behavior: 'smooth' });
+        setStatus('Ready');
+      }
+    }
+
+    if (getStartedBtn) getStartedBtn.addEventListener('click', showApp);
+    if (deployBtnDesktop) deployBtnDesktop.addEventListener('click', showApp);
+    if (deployBtnMobile) deployBtnMobile.addEventListener('click', showApp);
+
+    // File Handling
+    function loadSelectedFile(f) {
+      selectedFile = f;
+      if (clearBtn) clearBtn.style.display = 'inline-flex';
+      if (analyzeBtn) analyzeBtn.disabled = false;
+
+      // Thumbnail
+      if (f.type.startsWith('image/')) {
+        const url = URL.createObjectURL(f);
+        thumb.innerHTML = `<img src="${url}" alt="preview" />`;
+      } else {
+        thumb.innerHTML = `<div style="color: var(--white-70); display: flex; flex-direction: column; align-items: center; gap: 0.5rem;"><span>PDF Selected</span></div>`;
+      }
+      setStatus('Ready to analyze');
+    }
+
+    // Events
+    if (chooseBtn) chooseBtn.addEventListener('click', () => fileInput.click());
+    if (fileInput) fileInput.addEventListener('change', (e) => {
+      if (e.target.files[0]) loadSelectedFile(e.target.files[0]);
+    });
+
+    // Drag & Drop
+    if (drop) {
+      drop.addEventListener('dragenter', (e) => { e.preventDefault(); drop.classList.add('drag'); });
+      drop.addEventListener('dragover', (e) => { e.preventDefault(); });
+      drop.addEventListener('dragleave', (e) => { e.preventDefault(); drop.classList.remove('drag'); });
+      drop.addEventListener('drop', (e) => {
+        e.preventDefault(); drop.classList.remove('drag');
+        if (e.dataTransfer.files[0]) loadSelectedFile(e.dataTransfer.files[0]);
+      });
+      // Click to open
+      drop.addEventListener('click', (e) => {
+        if (e.target !== chooseBtn && e.target !== analyzeBtn && e.target !== clearBtn && e.target !== demoToggle && e.target.tagName !== 'LABEL') {
+          fileInput.click();
+        }
+      });
+    }
+
+    if (clearBtn) clearBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      resetUI();
+    });
+
+    if (demoToggle) demoToggle.addEventListener('change', (e) => {
+      demoMode = e.target.checked;
+      setStatus(demoMode ? 'Demo Mode' : 'Ready');
+    });
+
+    if (analyzeBtn) analyzeBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await analyzeFile();
+    });
+
+    // Backend Logic
+    async function analyzeFile() {
+      if (!selectedFile) return;
+      setStatus('Analyzing...', true);
+      analyzeBtn.disabled = true;
+
+      try {
+        if (demoMode) {
+          // Simulate
+          await new Promise(r => setTimeout(r, 1500));
+          const fake = {
+            extracted_text: "This is a sample lease agreement for 5 years between A and B.\n",
+            fields: {
+              purpose: "Lease Agreement",
+              duration: "5 years",
+              dates: ["2025-12-05"],
+              parties: ["A", "B"],
+              summary: "This is a sample lease agreement for 5 years between A and B.",
+              ml: {
+                summary: "This is a sample lease agreement.",
+                entities: [{ "type": "PERSON", "value": "A" }, { "type": "PERSON", "value": "B" }]
+              }
+            }
+          };
+          handleResult(fake);
+          setStatus('Done', 'success');
+        } else {
+          const fd = new FormData();
+          fd.append('file', selectedFile, selectedFile.name);
+          const resp = await fetch('/upload', { method: 'POST', body: fd });
+          if (!resp.ok) throw new Error(resp.statusText);
+          const j = await resp.json();
+          handleResult(j);
+          setStatus('Done', 'success');
+        }
+      } catch (err) {
+        console.error(err);
+        setStatus('Error', 'error');
+        alert('Analysis failed: ' + err.message);
+        analyzeBtn.disabled = false;
+      }
+    }
+
+    function handleResult(j) {
+      lastResult = j;
+      textOut.textContent = j.extracted_text || 'No text extracted.';
+      jsonOut.textContent = JSON.stringify(j.fields, null, 2);
+
+      const fields = j.fields || {};
+      kPurpose.textContent = fields.purpose || '—';
+      kDuration.textContent = fields.duration || '—';
+      kParties.textContent = (fields.parties && fields.parties.length) ? fields.parties.join(', ') : '—';
+
+      // ML Insights
+      const ml = fields.ml || {};
+      const summaryText = ml.summary || null;
+      if (mlSummary) mlSummary.textContent = summaryText || 'No AI summary available.';
+
+      if (mlEntities) {
+        if (ml.entities && ml.entities.length > 0) {
+          // Check if entities is list of strings or objects. Backend returns objects with {type, value}
+          const entList = ml.entities.map(e => {
+            if (typeof e === 'string') return e;
+            return `${e.type || e.label || 'Entity'}: ${e.value || e.word || ''}`;
+          });
+          mlEntities.textContent = entList.join('\n');
+        } else {
+          mlEntities.textContent = 'No entities detected.';
+        }
+      }
+
+      // Auto-open ML panel if we have data
+      if (summaryText || (ml.entities && ml.entities.length > 0)) {
+        if (mlBody) mlBody.classList.add('open');
+        if (mlChevron) mlChevron.style.transform = 'rotate(180deg)';
+      }
+
+      // Enable actions
+      copyJSON.disabled = false;
+      downloadJSON.disabled = false;
+      chatLegaiBtn.disabled = false;
+    }
+
+    function setStatus(msg, type) {
+      statusText.textContent = msg;
+      statusDot.className = 'status-dot ' + (type === 'success' ? 'success' : type ? 'active' : '');
+    }
+
+    function resetUI() {
+      selectedFile = null;
+      lastResult = null;
+      thumb.innerHTML = `<div style="color: var(--white-70); display: flex; flex-direction: column; align-items: center; gap: 0.5rem;"><span>No file selected</span></div>`;
+      textOut.textContent = 'No extracted text.';
+      jsonOut.textContent = '{ }';
+      kPurpose.textContent = '—';
+      kDuration.textContent = '—';
+      kParties.textContent = '—';
+      analyzeBtn.disabled = true;
+      clearBtn.style.display = 'none';
+      copyJSON.disabled = true;
+      downloadJSON.disabled = true;
+      chatLegaiBtn.disabled = true;
+      chatMessages.innerHTML = `<div class="msg msg-ai">Hello! I'm LEGAI. Once you analyze a document, I can answer your legal questions based on its content using Indian Law & BNS.</div>`;
+    }
+
+    // ============================================
+    // Chat Logic
+    // ============================================
+    if (chatLegaiBtn) chatLegaiBtn.addEventListener('click', () => {
+      chatPanel.classList.add('open');
+      setTimeout(() => chatInput.focus(), 100);
+    });
+
+    if (closeChatBtn) closeChatBtn.addEventListener('click', () => {
+      chatPanel.classList.remove('open');
+    });
+
+    if (chatSendBtn) chatSendBtn.addEventListener('click', sendChat);
+    if (chatInput) chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChat();
+      }
+    });
+
+    async function sendChat() {
+      const q = chatInput.value.trim();
+      if (!q) return;
+
+      // UI
+      const userDiv = document.createElement('div');
+      userDiv.className = 'msg msg-user';
+      userDiv.textContent = q;
+      chatMessages.appendChild(userDiv);
+      chatInput.value = '';
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+
+      // Mock or Real
+      try {
+        const docText = (lastResult && lastResult.extracted_text) || "";
+        if (!docText) {
+          appendAiMsg("Please analyze a document first.");
+          return;
+        }
+
+        if (demoMode) {
+          await new Promise(r => setTimeout(r, 1000));
+          appendAiMsg("Based on the document, this appears to be a standard agreement. (Demo Answer)");
+        } else {
+          const resp = await fetch('/chat-legai', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: docText,
+              question: q,
+              language: document.getElementById('chatLang').value || 'en'
+            })
+          });
+          const data = await resp.json();
+          // Handle complex response object
+          if (data.answer) {
+            appendAiMsg(data);
+          } else {
+            appendAiMsg(data.answer || "No answer returned.");
+          }
+        }
+      } catch (err) {
+        appendAiMsg("Error: " + err.message);
+      }
+    }
+
+    function appendAiMsg(txtOrData) {
+      const div = document.createElement('div');
+      div.className = 'msg msg-ai';
+
+      let contentHtml = "";
+      let metaHtml = "";
+
+      if (typeof txtOrData === 'string') {
+        // Simple string message (error or status)
+        contentHtml = txtOrData;
+      } else {
+        // Complex object from backend {answer, identified_bns_sections, legal_entities}
+        const rawAnswer = txtOrData.answer || "No answer provided.";
+        try {
+          contentHtml = marked.parse(rawAnswer);
+        } catch (e) {
+          console.error("Markdown parse error:", e);
+          contentHtml = rawAnswer;
+        }
+
+        // Metadata: BNS
+        if (txtOrData.identified_bns_sections && txtOrData.identified_bns_sections.length) {
+          metaHtml += `<div style="margin-top:8px; font-weight:600; color:#10b981; font-size:12px;">Relevant Sections:</div>`;
+          metaHtml += `<div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:4px;">`;
+          txtOrData.identified_bns_sections.forEach(sec => {
+            metaHtml += `<span style="font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(16,185,129,0.2); color:#10b981;">${sec}</span>`;
+          });
+          metaHtml += `</div>`;
+        }
+
+        // Metadata: Entities (Top 5)
+        if (txtOrData.legal_entities && txtOrData.legal_entities.length) {
+          metaHtml += `<div style="margin-top:8px; font-weight:600; color:#06b6d4; font-size:12px;">Entities Detected:</div>`;
+          metaHtml += `<div style="margin-top:4px; display:flex; flex-wrap:wrap; gap:4px;">`;
+          const entSet = new Set();
+          let count = 0;
+          txtOrData.legal_entities.forEach(ent => {
+            const t = (ent.word || ent.value || "").trim();
+            if (t && !entSet.has(t) && count < 6) {
+              entSet.add(t);
+              metaHtml += `<span style="font-size:10px; padding:2px 6px; border-radius:4px; background:rgba(6,182,212,0.2); color:#22d3ee;">${t}</span>`;
+              count++;
+            }
+          });
+          metaHtml += `</div>`;
+        }
+      }
+
+      div.innerHTML = `<div class="markdown-body">${contentHtml}</div>${metaHtml ? `<div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.1);">${metaHtml}</div>` : ''}`;
+      chatMessages.appendChild(div);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    if (copyJSON) copyJSON.addEventListener('click', () => {
+      if (lastResult) navigator.clipboard.writeText(JSON.stringify(lastResult, null, 2));
+    });
+  </script>
+</body>
+
+</html>
