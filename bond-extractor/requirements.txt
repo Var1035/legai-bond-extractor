@@ -16,4 +16,4 @@ sentencepiece
 accelerate
 protobuf
 
-mistralai
+mistralai==1.12.2

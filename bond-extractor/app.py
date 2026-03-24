@@ -21,13 +21,16 @@ import numpy as np # New import
 from mistralai import Mistral # New import
 from multilingual import normalize_query, translate_answer # Multilingual support
 
-# --- configure Tesseract path (update if yours differs) ---
-# If Tesseract is installed but not in PATH, set this to the absolute path to tesseract.exe
-# Example: r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-# If left as None, we'll try shutil.which and fallback to default behaviour.
-TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"  # <-- adjust if needed
-if TESSERACT_CMD:
-    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+# --- configure Tesseract path OS-agnostically ---
+import shutil
+if os.name == 'nt':
+    TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(TESSERACT_CMD):
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+else:
+    tpath = shutil.which("tesseract")
+    if tpath:
+        pytesseract.pytesseract.tesseract_cmd = tpath
 
 # PDF support (via pypdfium2, no system poppler needed)
 try:
