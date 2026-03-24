@@ -1,0 +1,1327 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard | Bond Extractor</title>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Marked.js -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            /* Dark Mode (Default) */
+            --bg-body: #0f172a;
+            --bg-sidebar: #1e293b;
+            --bg-card: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #334155;
+            --accent: #f97316;
+            --accent-hover: #ea580c;
+            --success: #10b981;
+            --info: #3b82f6;
+            --danger: #ef4444;
+        }
+
+        [data-theme="light"] {
+            /* Light Mode */
+            --bg-body: #f1f5f9;
+            --bg-sidebar: #ffffff;
+            --bg-card: #ffffff;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --accent: #f97316;
+            --accent-hover: #ea580c;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-body);
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 260px;
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem 1rem;
+            transition: width 0.3s;
+        }
+
+        .logo {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin-bottom: 2rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            color: var(--text-main);
+            padding: 0 0.5rem;
+        }
+
+        .logo svg {
+            color: var(--accent);
+        }
+
+        .nav-items {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            flex: 1;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+            border-radius: 0.5rem;
+            color: var(--text-muted);
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+
+        .nav-item:hover {
+            background: var(--bg-body);
+            color: var(--text-main);
+        }
+
+        .nav-item.active {
+            background: rgba(249, 115, 22, 0.1);
+            /* transparent orange */
+            color: var(--accent);
+            font-weight: 600;
+        }
+
+        .nav-footer {
+            border-top: 1px solid var(--border);
+            padding-top: 1rem;
+            margin-top: 1rem;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .topbar {
+            height: 70px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 2rem;
+            background: var(--bg-card);
+            /* or transparent */
+        }
+
+        .page-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .top-actions {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .btn-icon {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 0.5rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-icon:hover {
+            color: var(--text-main);
+            border-color: var(--text-muted);
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        /* Views */
+        .view-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 2rem;
+            display: none;
+            /* Hidden by default */
+        }
+
+        .view-container.active {
+            display: block;
+        }
+
+        /* Chat View specifics */
+        #view-chat.active {
+            display: flex;
+            flex-direction: column;
+            padding: 0;
+            background: var(--bg-body);
+        }
+
+        /* Grid for Dashboard */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 1.5rem;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .card.full-width {
+            grid-column: 1 / -1;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.25rem;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        /* Stats */
+        .stat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .stat-item {
+            background: var(--bg-body);
+            padding: 1rem;
+            border-radius: 0.5rem;
+            text-align: center;
+            border: 1px solid var(--border);
+        }
+
+        .stat-val {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .stat-lbl {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+
+        /* Chips/Tags */
+        .chip {
+            display: inline-flex;
+            font-size: 0.8rem;
+            padding: 0.25rem 0.75rem;
+            background: rgba(249, 115, 22, 0.1);
+            color: var(--accent);
+            border-radius: 99px;
+            margin-right: 0.5rem;
+            margin-bottom: 0.5rem;
+            border: 1px solid rgba(249, 115, 22, 0.3);
+        }
+
+        /* List Items */
+        .list-item {
+            padding: 1rem;
+            background: var(--bg-body);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            margin-bottom: 0.75rem;
+            cursor: pointer;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            flex-direction: column;
+        }
+
+        .list-item:hover {
+            border-color: var(--accent);
+            box-shadow: 0 2px 8px rgba(249, 115, 22, 0.08);
+        }
+
+        .list-item.expanded {
+            border-color: var(--accent);
+        }
+
+        .list-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+        }
+
+        .item-main {
+            font-weight: 500;
+            color: var(--text-main);
+        }
+
+        .item-sub {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .item-reason {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+        }
+
+        .item-reason .expand-icon {
+            transition: transform 0.2s;
+            font-size: 0.7rem;
+        }
+
+        .list-item.expanded .expand-icon {
+            transform: rotate(90deg);
+        }
+
+        .section-explanation {
+            display: none;
+            width: 100%;
+            margin-top: 0.75rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid var(--border);
+            font-size: 0.9rem;
+            line-height: 1.65;
+            color: var(--text-main);
+            animation: slideDown 0.3s ease-out;
+        }
+
+        .list-item.expanded .section-explanation {
+            display: block;
+        }
+
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                max-height: 0;
+            }
+
+            to {
+                opacity: 1;
+                max-height: 500px;
+            }
+        }
+
+        .explanation-loading {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .explanation-loading .dot-pulse {
+            display: inline-flex;
+            gap: 3px;
+        }
+
+        .explanation-loading .dot-pulse span {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: var(--accent);
+            animation: dotPulse 1.4s infinite ease-in-out both;
+        }
+
+        .explanation-loading .dot-pulse span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .explanation-loading .dot-pulse span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        /* ===== Chat UI ===== */
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            max-width: 860px;
+            margin: 0 auto;
+            width: 100%;
+            height: 100%;
+        }
+
+        .chat-history {
+            flex: 1;
+            overflow-y: auto;
+            padding: 2.5rem 2rem 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .chat-input-area {
+            padding: 1rem 2rem 1.5rem;
+            background: transparent;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 0.5rem;
+            max-width: 860px;
+            margin: 0 auto;
+            background: var(--bg-card);
+            border-radius: 1rem;
+            padding: 0.4rem 0.5rem 0.4rem 1rem;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+            transition: box-shadow 0.25s;
+        }
+
+        .input-group:focus-within {
+            box-shadow: 0 4px 20px rgba(249, 115, 22, 0.15), 0 2px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .chat-input {
+            flex: 1;
+            padding: 0.75rem 0.25rem;
+            border: none;
+            background: transparent;
+            color: var(--text-main);
+            outline: none;
+            font-size: 0.95rem;
+            font-family: inherit;
+        }
+
+        .chat-input::placeholder {
+            color: var(--text-muted);
+            opacity: 0.7;
+        }
+
+        .chat-send-btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.65rem 1.2rem;
+            border-radius: 0.65rem;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            transition: background 0.2s, transform 0.1s;
+            white-space: nowrap;
+            font-size: 0.9rem;
+        }
+
+        .chat-send-btn:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }
+
+        .chat-send-btn:active {
+            transform: translateY(0);
+        }
+
+        .chat-send-btn svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        /* Message Rows */
+        .msg-row {
+            display: flex;
+            gap: 0.75rem;
+            align-items: flex-start;
+            animation: msgSlideIn 0.35s ease-out;
+        }
+
+        @keyframes msgSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .msg-row.user {
+            flex-direction: row-reverse;
+        }
+
+        .msg-avatar {
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+
+        .msg-avatar.ai-avatar {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            color: white;
+        }
+
+        .msg-avatar.user-avatar {
+            background: linear-gradient(135deg, var(--accent), #f59e0b);
+            color: white;
+        }
+
+        /* Bubbles — clean, no borders */
+        .msg-bubble {
+            max-width: 78%;
+            padding: 1rem 1.25rem;
+            line-height: 1.7;
+            font-size: 0.925rem;
+            word-break: break-word;
+        }
+
+        .msg-bubble.user {
+            background: linear-gradient(135deg, var(--accent), #ea580c);
+            color: white;
+            border-radius: 1.25rem 1.25rem 0.25rem 1.25rem;
+            box-shadow: 0 2px 8px rgba(249, 115, 22, 0.18);
+        }
+
+        .msg-bubble.ai {
+            background: var(--bg-card);
+            border-radius: 1.25rem 1.25rem 1.25rem 0.25rem;
+            color: var(--text-main);
+            box-shadow: 0 1px 6px rgba(0, 0, 0, 0.06);
+        }
+
+        [data-theme="dark"] .msg-bubble.ai {
+            background: rgba(30, 41, 59, 0.8);
+            box-shadow: 0 1px 8px rgba(0, 0, 0, 0.22);
+        }
+
+        /* Typing indicator */
+        .typing-dots {
+            display: inline-flex;
+            gap: 5px;
+            align-items: center;
+            padding: 0.4rem 0;
+        }
+
+        .typing-dots span {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            animation: dotPulse 1.4s infinite ease-in-out both;
+        }
+
+        .typing-dots span:nth-child(1) {
+            animation-delay: 0s;
+        }
+
+        .typing-dots span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-dots span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes dotPulse {
+
+            0%,
+            80%,
+            100% {
+                transform: scale(0.55);
+                opacity: 0.35;
+            }
+
+            40% {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+
+        /* ===== Markdown / Typography ===== */
+        .md-content {
+            font-size: 0.925rem;
+            line-height: 1.7;
+        }
+
+        .md-content strong {
+            color: var(--accent);
+            font-weight: 700;
+        }
+
+        .md-content em {
+            font-style: italic;
+            opacity: 0.85;
+        }
+
+        .md-content p {
+            margin: 0 0 0.6rem;
+        }
+
+        .md-content p:last-child {
+            margin-bottom: 0;
+        }
+
+        .md-content ul,
+        .md-content ol {
+            padding-left: 1.35rem;
+            margin: 0.5rem 0 0.75rem;
+        }
+
+        .md-content li {
+            margin-bottom: 0.35rem;
+            line-height: 1.6;
+        }
+
+        .md-content li::marker {
+            color: var(--accent);
+        }
+
+        .md-content code {
+            font-family: 'Consolas', 'Fira Code', monospace;
+            font-size: 0.82rem;
+            background: rgba(255, 255, 255, 0.06);
+            padding: 0.15rem 0.4rem;
+            border-radius: 0.3rem;
+        }
+
+        [data-theme="light"] .md-content code {
+            background: rgba(0, 0, 0, 0.05);
+        }
+
+        .md-content pre {
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 1rem;
+            border-radius: 0.6rem;
+            overflow-x: auto;
+            margin: 0.6rem 0;
+            font-size: 0.82rem;
+            line-height: 1.55;
+        }
+
+        .md-content pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .md-content h1,
+        .md-content h2,
+        .md-content h3 {
+            margin: 0.75rem 0 0.35rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+
+        .md-content h1 {
+            font-size: 1.15rem;
+        }
+
+        .md-content h2 {
+            font-size: 1.05rem;
+        }
+
+        .md-content h3 {
+            font-size: 0.95rem;
+        }
+
+        .md-content blockquote {
+            margin: 0.5rem 0;
+            padding: 0.5rem 1rem;
+            background: rgba(249, 115, 22, 0.06);
+            border-radius: 0.5rem;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .md-content a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .md-content a:hover {
+            text-decoration: underline;
+        }
+
+        .md-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 0.5rem 0;
+            font-size: 0.85rem;
+        }
+
+        .md-content th,
+        .md-content td {
+            padding: 0.5rem 0.75rem;
+            text-align: left;
+        }
+
+        .md-content th {
+            font-weight: 600;
+            color: var(--accent);
+            border-bottom: 2px solid var(--border);
+        }
+
+        .md-content td {
+            border-bottom: 1px solid var(--border);
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="logo">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+                <polyline points="10 9 9 9 8 9" />
+            </svg>
+            Bond Extractor
+        </div>
+
+        <div class="nav-items">
+            <div class="nav-item active" onclick="switchView('dashboard')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="7" height="7" />
+                    <rect x="14" y="3" width="7" height="7" />
+                    <rect x="14" y="14" width="7" height="7" />
+                    <rect x="3" y="14" width="7" height="7" />
+                </svg>
+                Dashboard
+            </div>
+            <div class="nav-item" onclick="switchView('chat')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+                LegAI Chat
+            </div>
+            <div class="nav-item" onclick="switchView('raw')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="4 7 4 4 20 4 20 7" />
+                    <line x1="9" y1="20" x2="15" y2="20" />
+                    <line x1="12" y1="4" x2="12" y2="20" />
+                </svg>
+                Raw Data
+            </div>
+        </div>
+
+        <div class="nav-footer">
+            <a href="/" class="nav-item" style="color:var(--danger);">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                    <polyline points="16 17 21 12 16 7" />
+                    <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+                New Extraction
+            </a>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Topbar -->
+        <div class="topbar">
+            <div class="page-title" id="pageTitle">Overview</div>
+            <div class="top-actions">
+                <button class="btn-icon" id="themeToggle" title="Toggle Theme">
+                    <svg id="icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                    </svg>
+                    <svg id="icon-sun" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        stroke-width="2" style="display:none;">
+                        <circle cx="12" cy="12" r="5" />
+                        <line x1="12" y1="1" x2="12" y2="3" />
+                        <line x1="12" y1="21" x2="12" y2="23" />
+                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                        <line x1="1" y1="12" x2="3" y2="12" />
+                        <line x1="21" y1="12" x2="23" y2="12" />
+                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- 1. Dashboard View -->
+        <div id="view-dashboard" class="view-container active">
+            <div class="dashboard-grid">
+                <!-- Summary Card -->
+                <div class="card">
+                    <div class="card-header">Document Summary</div>
+                    <div style="font-size:1.1rem; font-weight:600; margin-bottom:1.5rem; line-height:1.4;"
+                        id="docTitle">Loading...</div>
+                    <div class="stat-grid">
+                        <div class="stat-item">
+                            <div class="stat-val" id="pgCount">-</div>
+                            <div class="stat-lbl">PAGES</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-val" id="ocrType" style="font-size:1rem;">-</div>
+                            <div class="stat-lbl">Detailed OCR</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Purpose Chart -->
+                <div class="card">
+                    <div class="card-header">Document Purpose (AI Confidence)</div>
+                    <div style="height:200px; position:relative;">
+                        <canvas id="purposeChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- AI Summary (New) -->
+                <div class="card full-width">
+                    <div class="card-header">
+                        <span>AI Executive Summary</span>
+                        <span class="chip"
+                            style="background:var(--bg-body); color:var(--text-muted); border:1px solid var(--border);">ML
+                            Generated</span>
+                    </div>
+                    <div id="aiSummary" style="line-height:1.6; color:var(--text-main);">
+                        <em style="color:var(--text-muted);">Generating summary...</em>
+                    </div>
+                </div>
+
+                <!-- Legal Compliance Assessment (New) -->
+                <div class="card full-width">
+                    <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                        Legal Compliance Assessment
+                        <span id="riskBadge" class="chip" style="font-weight:700; display:none;">Checking...</span>
+                    </div>
+                    <div class="risk-content" style="padding: 1rem 0;">
+                        <div
+                            style="display:flex; align-items:flex-start; gap:2rem; margin-bottom:1.5rem; flex-wrap:wrap;">
+                            <div style="text-align:center; min-width:120px;">
+                                <div style="font-size:3.5rem; font-weight:800; line-height:1;" id="riskScore">--</div>
+                                <div
+                                    style="font-size:0.75rem; color:var(--text-muted); margin-top:0.5rem; letter-spacing:1px;">
+                                    RISK SCORE</div>
+                            </div>
+                            <div style="flex:1; border-left:1px solid var(--border); padding-left:2rem;">
+                                <div style="font-weight:700; font-size:1.1rem; margin-bottom:0.75rem;" id="riskLevel">--
+                                </div>
+                                <div style="font-size:0.92rem; line-height:1.6;" id="riskReasons">
+                                    <em style="color:var(--text-muted);">Waiting for analysis...</em>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="missingClausesSection"
+                            style="display:none; background:rgba(239, 68, 68, 0.08); padding:1rem; border-radius:0.5rem; border:1px solid rgba(239, 68, 68, 0.2);">
+                            <div
+                                style="font-size:0.8rem; font-weight:700; color:var(--danger); margin-bottom:0.5rem; text-transform:uppercase; letter-spacing:0.5px;">
+                                Missing Mandatory Clauses</div>
+                            <div id="missingClausesList" style="display:flex; gap:0.5rem; flex-wrap:wrap;"></div>
+                        </div>
+
+                        <!-- Explain with AI Button -->
+                        <div style="margin-top:1rem; text-align:right;">
+                            <button id="btn-explain-risk" class="btn-primary" onclick="explainRisk()"
+                                style="font-size:0.85rem; padding:0.5rem 1rem; background:var(--surface); border:1px solid var(--border); color:var(--text-main); display:inline-flex; align-items:center; gap:0.5rem;">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <path
+                                        d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z">
+                                    </path>
+                                </svg>
+                                Explain with AI
+                            </button>
+                        </div>
+                        <div id="riskExplanationPanel"
+                            style="display:none; margin-top:1rem; padding:1rem; background:var(--bg-body); border-radius:0.5rem; font-size:0.95rem; line-height:1.6; border:1px solid var(--border);">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AI Insights -->
+                <div class="card full-width">
+                    <div class="card-header">
+                        <span>AI Identified Sections & Context</span>
+                        <span
+                            style="font-size:0.8rem; font-weight:normal; color:var(--text-muted); cursor:pointer; color:var(--accent);"
+                            onclick="switchView('chat')">Ask LegAI for details &rarr;</span>
+                    </div>
+                    <div id="sectionsList">
+                        <div style="text-align:center; color:var(--text-muted); padding:2rem;">No visible sections
+                            detected. Click "Chat" to analyze.</div>
+                    </div>
+                </div>
+
+                <!-- Entities -->
+                <div class="card full-width">
+                    <div class="card-header">Extracted Entities</div>
+                    <div id="partyTags"></div>
+                </div>
+
+                <!-- Full Text -->
+                <div class="card full-width">
+                    <div class="card-header">Full Text Content</div>
+                    <div id="fullText"
+                        style="max-height:200px; overflow-y:auto; font-family:monospace; font-size:0.9rem; color:var(--text-muted); white-space:pre-wrap;">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 2. Chat View -->
+        <div id="view-chat" class="view-container">
+            <div class="chat-container">
+                <div class="chat-history" id="chatHistory">
+                    <div class="msg-row">
+                        <div class="msg-avatar ai-avatar">AI</div>
+                        <div class="msg-bubble ai md-content">
+                            Hello! I am your <strong>LegAI</strong> assistant. I have analyzed the document. You can ask
+                            me about:
+                            <ul>
+                                <li>Specific clauses (e.g. "What is the termination clause?")</li>
+                                <li>Identified parties and their roles</li>
+                                <li>Financial obligations or dates</li>
+                                <li>Applicable laws (BNS/IPC)</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="chat-input-area">
+                    <div class="input-group">
+                        <input type="text" id="chatInput" class="chat-input"
+                            placeholder="Ask a question about this document...">
+                        <button class="chat-send-btn" onclick="sendChat()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="22" y1="2" x2="11" y2="13" />
+                                <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                            </svg>
+                            Send
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. Raw Data View -->
+        <div id="view-raw" class="view-container">
+            <div class="card full-width">
+                <div class="card-header">Raw JSON Data</div>
+                <pre id="rawData" style="color:var(--text-muted); font-size:0.85rem; overflow-x:auto;"></pre>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // Global Data
+        let appData = null;
+
+        // --- Theme Logic ---
+        const themeBtn = document.getElementById('themeToggle');
+        const iconSun = document.getElementById('icon-sun');
+        const iconMoon = document.getElementById('icon-moon');
+
+        function setTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            localStorage.setItem('theme', theme);
+            if (theme === 'light') {
+                iconSun.style.display = 'none';
+                iconMoon.style.display = 'block';
+            } else {
+                iconSun.style.display = 'block';
+                iconMoon.style.display = 'none';
+            }
+        }
+        const savedTheme = localStorage.getItem('theme') || 'dark';
+        setTheme(savedTheme);
+
+        themeBtn.addEventListener('click', () => {
+            const current = document.documentElement.getAttribute('data-theme');
+            setTheme(current === 'light' ? 'dark' : 'light');
+        });
+
+        // --- View Switching ---
+        function switchView(viewName) {
+            document.querySelectorAll('.view-container').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+
+            document.getElementById('view-' + viewName).classList.add('active');
+
+            const items = document.querySelectorAll('.nav-items .nav-item');
+            if (viewName === 'dashboard') items[0].classList.add('active');
+            if (viewName === 'chat') items[1].classList.add('active');
+            if (viewName === 'raw') items[2].classList.add('active');
+
+            const titles = { 'dashboard': 'Overview', 'chat': 'LegAI Assistant', 'raw': 'System Data' };
+            document.getElementById('pageTitle').textContent = titles[viewName];
+        }
+
+        // --- Initialization ---
+        const rawJson = localStorage.getItem('bond_data');
+        if (rawJson) {
+            try {
+                appData = JSON.parse(rawJson);
+                initDashboard(appData);
+            } catch (e) { console.error(e); }
+        } else {
+            document.getElementById('docTitle').textContent = "No Data Found. Please upload a file.";
+        }
+
+        function initDashboard(d) {
+            const f = d.fields || {};
+            const ml = f.ml || {};
+
+            document.getElementById('docTitle').textContent = f.title || 'Untitled Document';
+            document.getElementById('pgCount').textContent = d.pages_ocr || 1;
+            document.getElementById('ocrType').textContent = (d.method_used || 'Hybrid').toUpperCase();
+            document.getElementById('fullText').textContent = d.extracted_text || '';
+            document.getElementById('rawData').textContent = JSON.stringify(d, null, 2);
+
+            // Summary
+            const summaryEl = document.getElementById('aiSummary');
+            if (summaryEl) {
+                const sumText = ml.summary || f.summary || "No summary available.";
+                summaryEl.innerHTML = marked.parse(sumText);
+            }
+
+            // Legal Risk Assessment
+            const risk = d.risk_assessment || {};
+            if (risk.risk_score !== undefined) {
+                const score = risk.risk_score;
+                const level = risk.risk_level || "Unknown";
+                const reasons = risk.reasons || [];
+                const missing = risk.missing_clauses || [];
+
+                // Score Color
+                let color = "#10b981"; // Green
+                if (score > 30) color = "#f59e0b"; // Yellow
+                if (score > 60) color = "#ef4444"; // Red
+
+                const scoreEl = document.getElementById('riskScore');
+                scoreEl.textContent = score;
+                scoreEl.style.color = color;
+
+                const levelEl = document.getElementById('riskLevel');
+                levelEl.textContent = level.toUpperCase();
+                levelEl.style.color = color;
+
+                const badgeEl = document.getElementById('riskBadge');
+                badgeEl.textContent = level;
+                badgeEl.style.background = color + "20"; // 20 hex = 12% opacity
+                badgeEl.style.color = color;
+                badgeEl.style.display = "inline-block";
+
+                const reasonsEl = document.getElementById('riskReasons');
+                if (reasons.length > 0) {
+                    reasonsEl.innerHTML = `<ul style="margin:0; padding-left:1.2rem; color:var(--text-main);">` +
+                        reasons.map(r => `<li style="margin-bottom:0.35rem;">${r}</li>`).join('') +
+                        `</ul>`;
+                } else {
+                    reasonsEl.innerHTML = `<span style="color:#10b981;">No significant legal risks detected.</span>`;
+                }
+
+                const missingSec = document.getElementById('missingClausesSection');
+                const missingList = document.getElementById('missingClausesList');
+                if (missing.length > 0) {
+                    missingSec.style.display = "block";
+                    missingList.innerHTML = missing.map(m =>
+                        `<span class="chip" style="background:rgba(239, 68, 68, 0.15); color:var(--danger); border:1px solid rgba(239, 68, 68, 0.3); font-weight:600;">${m}</span>`
+                    ).join('');
+                } else {
+                    missingSec.style.display = "none";
+                }
+            }
+
+            // Entities
+            const pDiv = document.getElementById('partyTags');
+            if (f.parties && f.parties.length) {
+                pDiv.innerHTML = f.parties.map(p => `<span class="chip">${p}</span>`).join('');
+            } else {
+                pDiv.textContent = "No specific parties detected.";
+            }
+
+            // Sections
+            const sDiv = document.getElementById('sectionsList');
+            const sections = ml.ipc_sections || [];
+
+            if (sections.length > 0) {
+                sDiv.innerHTML = sections.map((s, i) => `
+                    <div class="list-item" id="section-${i}" onclick="toggleSection(${i}, '${(s.ipc || '').replace(/'/g, "\\'")}')"> 
+                        <div class="list-item-header">
+                            <div>
+                                <div class="item-main">${s.ipc}</div>
+                                <div class="item-sub">${s.bns || ''}</div>
+                            </div>
+                            <div class="item-reason">
+                                ${s.reason || 'Click to explain'}
+                                <span class="expand-icon">▶</span>
+                            </div>
+                        </div>
+                        <div class="section-explanation" id="explanation-${i}"></div>
+                    </div>
+                `).join('');
+            } else {
+                sDiv.innerHTML = `<div style="text-align:center; padding:2rem; color:var(--text-muted);">
+                    <div style="margin-bottom:0.5rem;">Predicting applicable sections...</div>
+                    <div class="typing-dots" style="justify-content:center;"><span></span><span></span><span></span></div>
+                </div>`;
+                // Auto-predict sections via chat endpoint
+                predictSections();
+            }
+
+            // Chart
+            const ctx = document.getElementById('purposeChart').getContext('2d');
+            const scores = ml.purpose_scores || {};
+            const labels = Object.keys(scores).filter(k => scores[k] > 0.01);
+            const values = labels.map(k => scores[k] * 100);
+            if (labels.length === 0) { labels.push("Unknown"); values.push(100); }
+
+            new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: ['#f97316', '#3b82f6', '#10b981', '#ef4444', '#a855f7'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { position: 'right', labels: { color: 'rgba(148, 163, 184, 1)' } } }
+                }
+            });
+        }
+
+        // --- Chat Logic ---
+        const chatInput = document.getElementById('chatInput');
+        const chatHistory = document.getElementById('chatHistory');
+
+        function createMsgRow(role, contentHtml, isLoading = false) {
+            const row = document.createElement('div');
+            row.className = `msg-row ${role}`;
+
+            const avatar = document.createElement('div');
+            avatar.className = `msg-avatar ${role === 'ai' ? 'ai-avatar' : 'user-avatar'}`;
+            avatar.textContent = role === 'ai' ? 'AI' : 'You';
+
+            const bubble = document.createElement('div');
+            bubble.className = `msg-bubble ${role} md-content`;
+
+            if (isLoading) {
+                bubble.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+                row.id = 'typing-' + Date.now();
+            } else {
+                bubble.innerHTML = contentHtml;
+            }
+
+            row.appendChild(avatar);
+            row.appendChild(bubble);
+            chatHistory.appendChild(row);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+            return row.id;
+        }
+
+        async function sendChat(qOverride) {
+            const q = qOverride || chatInput.value.trim();
+            if (!q) return;
+            if (!qOverride) chatInput.value = '';
+
+            // User message
+            createMsgRow('user', q);
+
+            // Typing indicator
+            const loadId = createMsgRow('ai', '', true);
+
+            try {
+                const text = appData ? (appData.extracted_text || '') : '';
+                const res = await fetch('/chat-legai', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text, question: q, language: 'en' })
+                });
+                const j = await res.json();
+
+                const loadEl = document.getElementById(loadId);
+                if (loadEl) loadEl.remove();
+
+                createMsgRow('ai', marked.parse(j.answer || "No answer generated."));
+            } catch (e) {
+                const loadEl = document.getElementById(loadId);
+                if (loadEl) loadEl.remove();
+                createMsgRow('ai', `<span style="color:var(--danger);">System Error: ${e.message}</span>`);
+            }
+        }
+
+        chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendChat(); });
+
+        // --- Section Explanation Logic ---
+        const explanationCache = {};
+
+        async function toggleSection(index, sectionName) {
+            const item = document.getElementById(`section-${index}`);
+            const expEl = document.getElementById(`explanation-${index}`);
+            if (!item || !expEl) return;
+
+            // Toggle expand/collapse
+            if (item.classList.contains('expanded')) {
+                item.classList.remove('expanded');
+                return;
+            }
+            item.classList.add('expanded');
+
+            // If already loaded, just show
+            if (explanationCache[sectionName]) {
+                expEl.innerHTML = `<div class="md-content">${explanationCache[sectionName]}</div>`;
+                return;
+            }
+
+            // Show loading
+            expEl.innerHTML = `<div class="explanation-loading">Generating explanation <div class="dot-pulse"><span></span><span></span><span></span></div></div>`;
+
+            try {
+                const text = appData ? (appData.extracted_text || '') : '';
+                const q = `Explain why ${sectionName} is relevant to this document. What specific clauses or terms in the document relate to this section? Be concise.`;
+                const res = await fetch('/chat-legai', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text, question: q, language: 'en' })
+                });
+                const j = await res.json();
+                const html = marked.parse(j.answer || 'No explanation available.');
+                explanationCache[sectionName] = html;
+                expEl.innerHTML = `<div class="md-content">${html}</div>`;
+            } catch (e) {
+                expEl.innerHTML = `<div style="color:var(--danger);">Failed to load explanation: ${e.message}</div>`;
+            }
+        }
+
+        async function predictSections() {
+            try {
+                const text = appData ? (appData.extracted_text || '') : '';
+                const q = `Identify the top 5 applicable legal sections (IPC, BNS, Indian Contract Act, or other relevant Indian laws) for this document. For each, provide the section name and a one-line reason.`;
+                const res = await fetch('/chat-legai', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text, question: q, language: 'en' })
+                });
+                const j = await res.json();
+                const sDiv = document.getElementById('sectionsList');
+                sDiv.innerHTML = `<div class="md-content" style="padding:1rem; line-height:1.7;">${marked.parse(j.answer || 'No sections predicted.')}</div>`;
+            } catch (e) {
+                const sDiv = document.getElementById('sectionsList');
+                sDiv.innerHTML = `<div style="text-align:center; padding:1rem; color:var(--danger);">Error predicting sections.</div>`;
+            }
+        }
+
+        function askAboutSection(sec) {
+            switchView('chat');
+            const q = `Explain the relevance of ${sec} in this document.`;
+            sendChat(q);
+        }
+
+        async function explainRisk() {
+            const btn = document.getElementById('btn-explain-risk');
+            const panel = document.getElementById('riskExplanationPanel');
+
+            if (!appData || !appData.risk_assessment) return;
+            const riskData = appData.risk_assessment;
+
+            panel.style.display = "block";
+            panel.innerHTML = "<div class='typing-dots'><span></span><span></span><span></span></div> <em>Generating explanation...</em>";
+            btn.disabled = true;
+
+            const prompt = `Explain the following legal risk assessment for a layman in clear, simple terms. 
+            Score: ${riskData.risk_score}/100. 
+            Level: ${riskData.risk_level}. 
+            Reasons: ${riskData.reasons.join(", ")}. 
+            Missing Clauses: ${riskData.missing_clauses.join(", ")}.
+            
+            Explain briefly why these specific factors are risky and what the implications are.`;
+
+            try {
+                const res = await fetch('/chat-legai', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: appData.extracted_text || "",
+                        question: prompt
+                    })
+                });
+                const data = await res.json();
+                if (data.answer) {
+                    panel.innerHTML = marked.parse(data.answer);
+                } else {
+                    panel.innerHTML = "Could not generate explanation.";
+                }
+            } catch (e) {
+                console.error(e);
+                panel.innerHTML = "Error fetching explanation. Please try again.";
+            } finally {
+                btn.disabled = false;
+            }
+        }
+    </script>
+</body>
+
+</html>

@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from legal_risk_engine import evaluate_document
 from PIL import Image
 import pytesseract
 from dateutil import parser as dateparser
@@ -460,6 +461,17 @@ def detect_purpose(text: str) -> Optional[str]:
         return labels.get(best, best)
     return None
 
+def extract_title(text: str) -> str:
+    """
+    Heuristic title extraction: First non-empty line that isn't a date or noise.
+    """
+    lines = text.split('\n')
+    for line in lines[:20]:
+        clean = line.strip()
+        if len(clean) > 5 and not re.match(r'^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$', clean):
+             return clean
+    return "Untitled Document"
+
 def extract_fields_from_text(text: str) -> Dict[str, Any]:
     purpose = detect_purpose(text) or "Unknown"
     duration = extract_duration(text)
@@ -467,7 +479,9 @@ def extract_fields_from_text(text: str) -> Dict[str, Any]:
     parties = extract_parties(text)
     money = extract_money(text)
     summary = simple_summary(text)
+    title = extract_title(text)
     return {
+        "title": title,
         "purpose": purpose,
         "duration": duration,
         "dates": dates,
@@ -506,7 +520,34 @@ def load_ml_models_once():
 def ml_summary(text: str) -> Optional[str]:
     if not text or not text.strip():
         return None
+
+    # CRITICAL: Load models first so mistral_client is available
     load_ml_models_once()
+        
+    # 1. Try Mistral for High-Quality Summary
+    client = getattr(app.state, "mistral_client", None)
+    if client:
+        print("Attempting Mistral AI Executive Summary...")
+        try:
+            prompt = (
+                f"You are a legal expert. Provide a comprehensive 'Final Review' of the document in one single paragraph. "
+                f"Use **Bold** for the Document Type, **Key Parties**, and **Core Subject Matter**. "
+                f"Write in a professional, flowing narrative style. "
+                f"Text: {text[:10000]}"
+            )
+            chat_response = client.chat.complete(
+                model="mistral-large-latest",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            summary = chat_response.choices[0].message.content
+            print("Mistral Summary Generated Successfully.")
+            return summary
+        except Exception as e:
+            print(f"Mistral Summary Error: {e}")
+            # Fallback to local
+            pass
+    else:
+        print("WARNING: Mistral Client is None in ml_summary. Falling back to regex.")
     summ = None
     try:
         if getattr(app.state, "summarizer", None):
@@ -684,6 +725,20 @@ async def upload(file: UploadFile = File(...)):
         "fields": fields,
         "hybrid_details": hybrid_details_per_page
     }
+
+    # 5. Legal Risk Assessment (Added)
+    try:
+        risk_result = evaluate_document({
+            "extracted_text": full_text,
+            "legal_entities": ml_ents,
+            "identified_bns_sections": ml_ipc,
+            "ml_insights": fields["ml"]
+        })
+        out["risk_assessment"] = risk_result
+    except Exception as e:
+        print(f"Risk Assessment Failed: {e}")
+        out["risk_assessment"] = None
+
     return JSONResponse(out)
 
 @app.get("/", response_class=HTMLResponse)
@@ -691,6 +746,14 @@ def index():
     path = os.path.join("static", "index.html")
     if not os.path.exists(path):
         return HTMLResponse("<h2>UI not found: static/index.html</h2>", status_code=404)
+    with open(path, "r", encoding="utf8") as f:
+        return HTMLResponse(f.read())
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    path = os.path.join("static", "dashboard.html")
+    if not os.path.exists(path):
+        return HTMLResponse("<h2>Dashboard UI not found: static/dashboard.html</h2>", status_code=404)
     with open(path, "r", encoding="utf8") as f:
         return HTMLResponse(f.read())
 
@@ -803,64 +866,100 @@ def identify_ipc_sections(text: str) -> List[Dict[str, Any]]:
     """
     Run LawIPC model to identify IPC sections and map them to BNS.
     """
-    if not hasattr(app.state, "ipc_model") or not app.state.ipc_model:
-        return []
-    
+    """
+    Run LawIPC model to identify IPC sections and map them to BNS.
+    """
     results = []
-    try:
-        # LawIPC: shreyas-dev/lawipc-ft is likely a text-classification model
-        # We need to run it on segments if the text is long, but for now we look at the first chunk.
-        preds = app.state.ipc_model(text[:1000])
-        
-        # Handle different return formats
-        if preds and isinstance(preds[0], list):
-             preds = preds[0]
-        
-        # Filter high confidence predictions
-        detected_labels = [p['label'] for p in preds if p['score'] > 0.4]
-        
-        # Also map strictly based on regex if the model misses obvious ones 
-        # (Hybrid approach is best for "Real World", but User emphasizes ML Insights)
-        regex_ipc = re.findall(r'\bIPC\s*(\d+[A-Z]?)\b', text, re.IGNORECASE)
-        for r in regex_ipc:
-            lbl = f"IPC {r.upper()}"
-            # Normalize for matching
-            detected_labels.append(lbl)
-
-        # Map to BNS
-        # Load mapping if not loaded
-        if not IPC_BNS_MAPPING:
-             load_ipc_bns_mapping()
-
-        unique_codes = set()
-        
-        for label in detected_labels:
-            # Normalize label
-            # label could be "LABEL_1" or "IPC 420" depending on model
-            # For this specific model `shreyas-dev/lawipc-ft`, we assume it outputs class names or we need to map.
-            # Without knowing exact label map, we rely on the regex fallback for robustness + model output usage.
-            # If model outputs "IPC 420", we use it.
+    
+    # 1. Try Local LawIPC Model (if available)
+    if hasattr(app.state, "ipc_model") and app.state.ipc_model:
+        try:
+            # LawIPC: shreyas-dev/lawipc-ft is likely a text-classification model
+            # We need to run it on segments if the text is long, but for now we look at the first chunk.
+            preds = app.state.ipc_model(text[:1000])
             
-            clean_label = label.upper().replace("_", " ").strip()
-            if "IPC" not in clean_label and clean_label.replace(" ", "").isdigit():
-                clean_label = f"IPC {clean_label}"
+            # Handle different return formats
+            if preds and isinstance(preds[0], list):
+                 preds = preds[0]
             
-            # Extract number
-            match = re.search(r'(\d+[A-Z]?)', clean_label)
-            if match:
-                code_num = match.group(1)
-                ipc_key = f"IPC {code_num}"
-                unique_codes.add(ipc_key)
+            # Filter high confidence predictions
+            detected_labels = [p['label'] for p in preds if p['score'] > 0.4]
+        except Exception as e:
+            print(f"IPC Model Error: {e}")
+            detected_labels = []
 
-        for ipc_key in unique_codes:
+        
+    # Also map strictly based on regex if the model misses obvious ones 
+    regex_ipc = re.findall(r'\bIPC\s*(\d+[A-Z]?)\b', text, re.IGNORECASE)
+    seen = set()
+    
+    if not IPC_BNS_MAPPING:
+         load_ipc_bns_mapping()
+
+    for r in regex_ipc:
+        code = r.strip()
+        ipc_key = f"IPC {code}"
+        if ipc_key not in seen:
             bns_val = IPC_BNS_MAPPING.get(ipc_key, "Mapping not found")
             results.append({"ipc": ipc_key, "bns": bns_val})
-            
-        return results
+            seen.add(ipc_key)
 
+    # 2. Use Mistral if we have few results or to get a better analysis
+    # The user explicitly asked to "retrieve from MISTRAL"
+    # We will ask Mistral to identify applicable sections even if not explicitly mentioned.
+    try:
+            # We'll ask Mistral for a JSON list of objects
+            prompt = (
+                f"Analyze the following legal document text and identify the applicable legal sections "
+                f"(IPC, BNS, Indian Contract Act, or other relevant Indian laws). "
+                f"Return ONLY a JSON list of objects with 'ipc' (section name/number) and 'reason' keys. "
+                f"Example: [{{\"ipc\": \"Section 27 Contract Act\", \"reason\": \"Agreement in restraint of trade\"}}, {{\"ipc\": \"IPC 420\", \"reason\": \"Cheating\"}}]. "
+                f"Text: {text[:4000]}"
+            )
+            
+            client = getattr(app.state, "mistral_client", None)
+            if client:
+                chat_response = client.chat.complete(
+                    model="mistral-large-latest",
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"}
+                )
+                content = chat_response.choices[0].message.content
+                # Clean markdown backticks if present
+                if "```" in content:
+                    content = re.sub(r'```json\s*', '', content)
+                    content = re.sub(r'```\s*', '', content)
+                
+                import json
+                try:
+                    ai_sections = json.loads(content)
+                    # Support both list or wrapped object
+                    items = ai_sections if isinstance(ai_sections, list) else ai_sections.get('sections', [])
+                    
+                    for item in items:
+                        ipc = item.get('ipc') or item.get('section')
+                        if ipc:
+                            ipc = str(ipc).replace('_', ' ').strip()
+                            # Check duplicates
+                            if ipc in seen: 
+                                continue
+                                
+                            # Try to normalize "420" -> "IPC 420"
+                            if "IPC" not in ipc.upper() and ipc.replace(" ", "").isdigit():
+                                ipc = f"IPC {ipc}"
+                                
+                            bns_val = IPC_BNS_MAPPING.get(ipc, "Mapping not found")
+                            results.append({"ipc": ipc, "bns": bns_val, "reason": item.get('reason')})
+                            seen.add(ipc)
+                except Exception as e:
+                    print(f"JSON Parse Error for Sections: {e}")
+                    pass
     except Exception as e:
-        print(f"IPC Identification Error: {e}")
-        return []
+        print(f"Mistral Section Extraction Error: {e}")
+
+    return results
 
 def extract_legal_entities(text: str) -> List[Dict[str, str]]:
     """

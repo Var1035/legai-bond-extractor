@@ -5,10 +5,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Legal Doc Extractor</title>
-  <!-- Lottie Player -->
-  <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
+  <!-- Lottie Player (dotlottie-wc) -->
+  <script src="https://unpkg.com/@lottiefiles/dotlottie-wc@0.8.11/dist/dotlottie-wc.js" type="module"></script>
   <!-- Marked.js for Markdown Rendering -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Chart.js for Visualizations -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     * {
       margin: 0;
@@ -643,6 +645,74 @@
       /* Cyan for italics */
       font-style: italic;
     }
+
+    /* ====== Analysis Overlay ====== */
+    .analysis-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      background: rgba(0, 0, 0, 0.88);
+    }
+
+    .analysis-overlay.active {
+      display: flex;
+    }
+
+    .overlay-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.5rem;
+      animation: fadeInScale 0.4s ease-out;
+      position: relative;
+      z-index: 1;
+    }
+
+    @keyframes fadeInScale {
+      from {
+        opacity: 0;
+        transform: scale(0.9);
+      }
+
+      to {
+        opacity: 1;
+        transform: scale(1);
+      }
+    }
+
+    .overlay-status {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #f8fafc;
+      letter-spacing: 0.02em;
+      text-align: center;
+    }
+
+    .overlay-substatus {
+      font-size: 0.9rem;
+      color: rgba(255, 255, 255, 0.6);
+      text-align: center;
+    }
+
+    .overlay-progress {
+      width: 260px;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+
+    .overlay-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--primary), var(--primary-light));
+      border-radius: 99px;
+      transition: width 0.8s ease;
+    }
   </style>
   <style>
     /* ========================================= */
@@ -1145,16 +1215,143 @@
       padding: 0.625rem;
     }
 
-    @keyframes fade-in-up {
-      from {
-        opacity: 0;
-        transform: translateY(20px);
-      }
+    /* Dashboard Styles */
+    .dashboard-container {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.5rem;
+      animation: fade-in-up 0.6s ease-out;
+    }
 
-      to {
-        opacity: 1;
-        transform: translateY(0);
+    @media (min-width: 1024px) {
+      .dashboard-container {
+        grid-template-columns: 2fr 1fr;
       }
+    }
+
+    .dashboard-card {
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--white-10);
+      border-radius: 1rem;
+      padding: 1.5rem;
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .stat-item {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 0.5rem;
+      padding: 1rem;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    .stat-label {
+      font-size: 0.75rem;
+      color: var(--white-70);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .chart-container {
+      position: relative;
+      height: 200px;
+      width: 100%;
+      display: flex;
+      justify-content: center;
+    }
+
+    .section-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .section-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.75rem;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--white-10);
+      border-radius: 0.5rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .section-item:hover {
+      background: rgba(249, 115, 22, 0.1);
+      border-color: var(--primary);
+    }
+
+    .section-ipc {
+      font-weight: 600;
+      color: var(--primary-light);
+    }
+
+    .section-bns {
+      font-size: 0.8rem;
+      color: var(--white-70);
+    }
+
+    /* Modal for Section "Why" */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.8);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+
+    .modal-overlay.active {
+      opacity: 1;
+      pointer-events: all;
+    }
+
+    .modal-content {
+      background: #1a1a1a;
+      border: 1px solid var(--primary);
+      border-radius: 1rem;
+      padding: 2rem;
+      max-width: 600px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: 0 0 50px rgba(249, 115, 22, 0.2);
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+    }
+
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--white-70);
+      font-size: 1.5rem;
+      cursor: pointer;
     }
 
     @media(max-width: 640px) {
@@ -1672,7 +1869,7 @@
       </div>-->
 
       <h1>
-        Intelligent Legal Document Analyzer
+        Intelligent Document Analyzer
         <br />
         <span class="line-shadow-text">Using AI & ML Libraries</span>
       </h1>
@@ -1892,7 +2089,57 @@
 
     <!-- Results Column -->
     <div class="results-column">
-      <div class="glass-card" style="padding: 1.5rem;">
+      <!-- DASHBOARD SECTION (Hidden Initially) -->
+      <div id="dashboard-section" class="dashboard-container hidden">
+        <!-- Main Stats & Charts -->
+        <div class="dashboard-card">
+          <h2 class="text-xl font-bold mb-4" style="color: var(--primary);">Document Overview</h2>
+
+          <div class="stat-grid">
+            <div class="stat-item">
+              <div class="stat-value" id="dash-pages">0</div>
+              <div class="stat-label">Pages Scanned</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value" id="dash-ocr">Hybrid</div>
+              <div class="stat-label">OCR Method</div>
+            </div>
+            <div class="stat-item" style="grid-column: span 2;">
+              <div class="stat-value" id="dash-title" style="font-size: 1.2rem;">-</div>
+              <div class="stat-label">Document Title</div>
+            </div>
+          </div>
+
+          <div style="margin-top: 2rem;">
+            <h3 class="text-lg font-semibold mb-3">Parties Involved</h3>
+            <div id="dash-parties" class="flex flex-wrap gap-2">
+              <span class="badge">Processing...</span>
+            </div>
+          </div>
+
+          <div style="margin-top: 2rem;">
+            <h3 class="text-lg font-semibold mb-3">Risk / Purpose Distribution</h3>
+            <div class="chart-container">
+              <canvas id="purposeChart"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Col: Sections & AI Insights -->
+        <div class="flex flex-col gap-6">
+          <div class="dashboard-card">
+            <h3 class="text-lg font-semibold mb-3">Identified Sections</h3>
+            <p class="text-sm text-gray-400 mb-4">Click to analyze why this section applies.</p>
+            <div id="dash-sections" class="section-list">
+              <!-- Populated by JS -->
+              <div class="text-center text-gray-500 py-4">No sections detected.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Result View (Existing, slightly modified to be secondary or below dashboard) -->
+      <div id="results-view" class="glass-card hidden" style="padding: 1.5rem;">
         <div class="results-header">
           <div style="display:flex; align-items:center; gap:16px;">
             <div class="results-title">
@@ -2021,6 +2268,19 @@
           <polygon points="22 2 15 22 11 13 2 9 22 2" />
         </svg>
       </button>
+    </div>
+  </div>
+
+  <!-- Analysis Overlay -->
+  <div class="analysis-overlay" id="analysisOverlay">
+    <div class="overlay-content">
+      <dotlottie-wc src="https://lottie.host/7f944e17-6c14-4364-a99b-c10b3fc8f266/DH3yljpzkN.lottie"
+        style="width: 900px;height:300px" autoplay loop></dotlottie-wc>
+      <div class="overlay-status" id="overlayStatus">Analysing Document...</div>
+      <div class="overlay-substatus" id="overlaySubstatus">This may take a moment</div>
+      <div class="overlay-progress">
+        <div class="overlay-progress-bar" id="overlayBar"></div>
+      </div>
     </div>
   </div>
 
@@ -2172,30 +2432,223 @@
       await analyzeFile();
     });
 
-    // Backend Logic
+
+    // ============================================
+    // DASHBOARD LOGIC
+    // ============================================
+    const dashboardSection = document.getElementById('dashboard-section');
+    const resultsView = document.getElementById('results-view');
+    const purposeChartCanvas = document.getElementById('purposeChart');
+    let purposeChartInstance = null;
+
+    // Elements for Dashboard
+    const dashPages = document.getElementById('dash-pages');
+    const dashOcr = document.getElementById('dash-ocr');
+    const dashTitle = document.getElementById('dash-title');
+    const dashParties = document.getElementById('dash-parties');
+    const dashSections = document.getElementById('dash-sections');
+
+    // Modal
+    const explanationModal = document.getElementById('explanation-modal');
+    const modalTitle = document.getElementById('modal-title');
+    const modalBody = document.getElementById('modal-body');
+
+    function updateDashboard(data) {
+      // Save data to localStorage and redirect
+      localStorage.setItem('bond_data', JSON.stringify(data));
+      window.location.href = '/dashboard';
+    }
+
+    function renderPurposeChart(scores) {
+      if (purposeChartInstance) purposeChartInstance.destroy();
+
+      // Filter out zero scores for cleaner chart
+      const labels = [];
+      const values = [];
+      Object.entries(scores).forEach(([k, v]) => {
+        if (v > 0.01) {
+          labels.push(k);
+          values.push(v * 100);
+        }
+      });
+
+      if (labels.length === 0) {
+        labels.push("Unknown");
+        values.push(100);
+      }
+
+      const ctx = purposeChartCanvas.getContext('2d');
+      purposeChartInstance = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: labels,
+          datasets: [{
+            data: values,
+            backgroundColor: [
+              '#f97316', // Orange
+              '#3b82f6', // Blue
+              '#10b981', // Green
+              '#ef4444', // Red
+              '#a855f7', // Purple
+              '#64748b'  // Gray
+            ],
+            borderWidth: 0
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'right',
+              labels: { color: 'rgba(255,255,255,0.7)' }
+            }
+          }
+        }
+      });
+    }
+
+    function renderSectionsList(sections) {
+      dashSections.innerHTML = '';
+      if (!sections || sections.length === 0) {
+        dashSections.innerHTML = '<div class="text-center text-gray-500 py-4">No specific IPC/BNS sections detected.</div>';
+        return;
+      }
+
+      sections.forEach(sec => {
+        const item = document.createElement('div');
+        item.className = 'section-item';
+        item.innerHTML = `
+                <div>
+                  <div class="section-ipc">${sec.ipc || 'Section'}</div>
+                  <div class="section-bns">Mapped to: ${sec.bns || 'Unknown'}</div>
+                </div>
+                <div style="color:var(--primary); font-size:0.8rem;">Analyze &rarr;</div>
+            `;
+        item.onclick = () => openSectionAnalysis(sec.ipc);
+        dashSections.appendChild(item);
+      });
+    }
+
+    // Interactive Analysis
+    async function openSectionAnalysis(sectionName) {
+      openModal(`Analysis: ${sectionName}`);
+      modalBody.innerHTML = '<div style="text-align:center; padding:2rem;"><div class="spinner"></div><p>Asking Mistral AI...</p></div>'; // Spinner placeholder
+
+      const fullText = lastResult ? (lastResult.extracted_text || '') : '';
+      const question = `Explain why ${sectionName} is applicable to this document and what it implies for the parties involved.`;
+
+      try {
+        const resp = await fetch('/chat-legai', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: fullText,
+            question: question,
+            language: 'en'
+          })
+        });
+        const data = await resp.json();
+        // Convert markdown to HTML
+        modalBody.innerHTML = marked.parse(data.answer || "No explanation provided.");
+      } catch (e) {
+        modalBody.innerHTML = `<p style="color:red">Error: ${e.message}</p>`;
+      }
+    }
+
+    // Modal Functions
+    function openModal(title) {
+      if (modalTitle) modalTitle.textContent = title;
+      if (explanationModal) explanationModal.classList.add('active');
+    }
+
+    window.closeModal = function () { // Expose to global scope for button onclick
+      if (explanationModal) explanationModal.classList.remove('active');
+    };
+
+    // Close on outside click
+    if (explanationModal) {
+      explanationModal.addEventListener('click', (e) => {
+        if (e.target === explanationModal) closeModal();
+      });
+    }
+
+    // ============================================
+    // Main Analyze Flow Update
+    // ============================================
+    // ====== Overlay Helpers ======
+    const analysisOverlay = document.getElementById('analysisOverlay');
+    const overlayStatus = document.getElementById('overlayStatus');
+    const overlaySubstatus = document.getElementById('overlaySubstatus');
+    const overlayBar = document.getElementById('overlayBar');
+    let overlayInterval = null;
+
+    const STATUS_MSGS = [
+      { main: 'Analysing Document...', sub: 'Preparing your file' },
+      { main: 'Running OCR Engine...', sub: 'Extracting text from pages' },
+      { main: 'Extracting Key Fields...', sub: 'Identifying parties, dates & clauses' },
+      { main: 'Identifying Legal Sections...', sub: 'Matching IPC / BNS / Contract Act' },
+      { main: 'Generating AI Summary...', sub: 'Summarising with ML models' },
+      { main: 'Fetching Insights...', sub: 'Almost there...' },
+    ];
+
+    function showOverlay() {
+      analysisOverlay.classList.add('active');
+      let step = 0;
+      overlayBar.style.width = '5%';
+      overlayStatus.textContent = STATUS_MSGS[0].main;
+      overlaySubstatus.textContent = STATUS_MSGS[0].sub;
+
+      overlayInterval = setInterval(() => {
+        step++;
+        if (step < STATUS_MSGS.length) {
+          overlayStatus.textContent = STATUS_MSGS[step].main;
+          overlaySubstatus.textContent = STATUS_MSGS[step].sub;
+          overlayBar.style.width = Math.min(15 + step * 15, 90) + '%';
+        }
+      }, 3000);
+    }
+
+    function hideOverlay() {
+      if (overlayInterval) clearInterval(overlayInterval);
+      overlayBar.style.width = '100%';
+      overlayStatus.textContent = 'Done! Redirecting...';
+      overlaySubstatus.textContent = '';
+      setTimeout(() => {
+        analysisOverlay.classList.remove('active');
+        overlayBar.style.width = '0%';
+      }, 600);
+    }
+
+    // ====== Main Analyze Flow ======
     async function analyzeFile() {
       if (!selectedFile) return;
       setStatus('Analyzing...', true);
       analyzeBtn.disabled = true;
+      showOverlay();
 
       try {
         if (demoMode) {
-          // Simulate
-          await new Promise(r => setTimeout(r, 1500));
+          await new Promise(r => setTimeout(r, 4000));
           const fake = {
-            extracted_text: "This is a sample lease agreement for 5 years between A and B.\n",
+            pages_ocr: 3,
+            method_used: "Hybrid (Demo)",
+            extracted_text: "This is a sample lease agreement for 5 years between A and B.\nIPC 420 mentioned.",
             fields: {
+              title: "SAMPLE LEASE AGREEMENT",
               purpose: "Lease Agreement",
               duration: "5 years",
               dates: ["2025-12-05"],
-              parties: ["A", "B"],
-              summary: "This is a sample lease agreement for 5 years between A and B.",
+              parties: ["Rajesh Kumar", "Priya Sharma"],
               ml: {
-                summary: "This is a sample lease agreement.",
-                entities: [{ "type": "PERSON", "value": "A" }, { "type": "PERSON", "value": "B" }]
+                ipc_sections: [{ ipc: "IPC 420", bns: "BNS 318" }],
+                purpose_scores: { "Lease Agreement": 0.9, "Rental": 0.1 }
               }
             }
           };
+          lastResult = fake;
+          hideOverlay();
+          updateDashboard(fake);
           handleResult(fake);
           setStatus('Done', 'success');
         } else {
@@ -2204,13 +2657,18 @@
           const resp = await fetch('/upload', { method: 'POST', body: fd });
           if (!resp.ok) throw new Error(resp.statusText);
           const j = await resp.json();
+          lastResult = j;
+          hideOverlay();
+          updateDashboard(j);
           handleResult(j);
           setStatus('Done', 'success');
         }
       } catch (err) {
         console.error(err);
+        hideOverlay();
         setStatus('Error', 'error');
         alert('Analysis failed: ' + err.message);
+      } finally {
         analyzeBtn.disabled = false;
       }
     }
@@ -2221,12 +2679,13 @@
       jsonOut.textContent = JSON.stringify(j.fields, null, 2);
 
       const fields = j.fields || {};
+      const ml = fields.ml || {};
+
       kPurpose.textContent = fields.purpose || '—';
       kDuration.textContent = fields.duration || '—';
       kParties.textContent = (fields.parties && fields.parties.length) ? fields.parties.join(', ') : '—';
 
       // ML Insights
-      const ml = fields.ml || {};
       const summaryText = ml.summary || null;
       if (mlSummary) mlSummary.textContent = summaryText || 'No AI summary available.';
 

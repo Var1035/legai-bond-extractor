@@ -1,0 +1,37 @@
+version: "2"
+type: backend
+tech_stack:
+  - python
+  - fastapi
+  - pytesseract
+  - pypdfium2
+features:
+  - name: Document Upload and OCR Processing
+    description: Hybrid OCR pipeline (Tesseract, PaddleOCR, TrOCR) for uploaded documents
+    files:
+      - app.py
+    endpoints:
+      - method: POST
+        path: /upload
+        description: Upload image or PDF to extract text and legal risks
+        auth_required: false
+  - name: Dashboard and Health
+    description: Web UI and health check
+    files:
+      - app.py
+      - static/index.html
+      - static/dashboard.html
+    endpoints:
+      - method: GET
+        path: /
+        description: Serve index.html
+        auth_required: false
+      - method: GET
+        path: /dashboard
+        description: Serve dashboard.html
+        auth_required: false
+      - method: GET
+        path: /health
+        description: Quick tesseract check
+        auth_required: false
+known_limitations: []

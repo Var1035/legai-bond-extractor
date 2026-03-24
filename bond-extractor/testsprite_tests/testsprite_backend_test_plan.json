@@ -1,0 +1,52 @@
+[
+  {
+    "id": "TC001",
+    "title": "post upload with valid pdf or image file",
+    "description": "Test uploading a valid PDF or image file to the /upload endpoint and verify the response contains job_id, status as 'completed', processed as true, and a results_summary_url. Then verify the /dashboard endpoint returns a 200 status with the document summary displayed."
+  },
+  {
+    "id": "TC002",
+    "title": "post upload with unsupported file type",
+    "description": "Test uploading an unsupported file type (e.g., .exe) to the /upload endpoint and verify the response status is 400 with an error message indicating unsupported media type."
+  },
+  {
+    "id": "TC003",
+    "title": "post upload with very large file exceeding limits",
+    "description": "Test uploading a file that exceeds the size limits to the /upload endpoint and verify the response status is 413 Payload Too Large and the client displays a 'file too large' message."
+  },
+  {
+    "id": "TC004",
+    "title": "post upload with scanned pdf for ocr extraction",
+    "description": "Test uploading a scanned PDF to the /upload endpoint and verify the response contains extracted_text, the OCR engine used (tesseract, trocr, or paddle), and a high OCR confidence score. Then verify the /dashboard endpoint shows the extracted text preview."
+  },
+  {
+    "id": "TC005",
+    "title": "post upload with low quality scan",
+    "description": "Test uploading a low-quality scanned document to the /upload endpoint and verify the response contains empty extracted_text, OCR warnings including 'low_confidence', and a low OCR confidence score. Verify the client prompts the user to re-upload a clearer document."
+  },
+  {
+    "id": "TC006",
+    "title": "post upload with document type classification",
+    "description": "Test uploading a document such as an employment agreement PDF to the /upload endpoint and verify the response contains the document_type and a confidence score. Then verify the /dashboard endpoint displays the correct document type."
+  },
+  {
+    "id": "TC007",
+    "title": "post upload with clause detection",
+    "description": "Test uploading a contract containing legal clauses to the /upload endpoint and verify the response contains detected clauses with names, text, page numbers, and confidence scores, as well as an empty missing_clauses list. Then verify the /dashboard endpoint shows detected clauses with links."
+  },
+  {
+    "id": "TC008",
+    "title": "post upload with weighted compliance scoring",
+    "description": "Test uploading a document with multiple detected clauses to the /upload endpoint and verify the response contains a compliance_score, total_weight, and detected_weight. Then verify the /dashboard endpoint displays the compliance score correctly."
+  },
+  {
+    "id": "TC009",
+    "title": "get health check endpoint",
+    "description": "Test the /health endpoint to verify it returns a 200 status with JSON indicating status as 'ok', tesseract availability, and version information."
+  },
+  {
+    "id": "TC010",
+    "title": "get health check when tesseract not installed",
+    "description": "Test the /health endpoint when tesseract is not installed and verify it returns a 500 status with JSON indicating an error status, component as 'tesseract', and an appropriate error message."
+  }
+]

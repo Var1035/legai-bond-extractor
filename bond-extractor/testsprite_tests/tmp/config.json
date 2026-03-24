@@ -1,0 +1,19 @@
+{
+  "status": "commited",
+  "type": "backend",
+  "scope": "codebase",
+  "localEndpoint": "http://localhost:8000",
+  "backendAuthType": "public",
+  "executionArgs": {
+    "projectName": "bond-extractor",
+    "projectPath": "c:\\Users\\varun\\Downloads\\bond-extractor\\bond-extractor",
+    "testIds": [],
+    "additionalInstruction": "",
+    "serverMode": "development",
+    "envs": {
+      "API_KEY": "sk-user-XaaKVSs2qJ01U4_Vh1AJJKoY3Vhjr5BXtrBC7eW2xr4JooI2sdzu8X2JX6_Uu6P8mp-fhZyEeNcjeJd85-SiiGp_gJUPtmhLBuPCoLols1BwgnQGPGRYQIuCSiXlEpwCMBg"
+    }
+  },
+  "serverPort": 51198,
+  "proxy": "http://dffabc27-0dd7-4124-8841-0e0cdca79e18:QSeA5ZIVbvWG675yFo09tgzCinEERijR@tun.testsprite.com:8080"
+}
